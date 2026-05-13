@@ -10,7 +10,7 @@ numpy>=1.24.0                 # Numerical computing
 
 # === CHARTING & VISUALIZATION ===
 matplotlib>=3.5.0             # Plotting library
-mplfinance>=0.12.0            # Financial charts and candlesticks
+mplfinance>=0.12.0b0          # Financial charts (pre-release versions)
 
 # === GUI FRAMEWORK ===
 # tkinter (built-in with Python - no installation needed)

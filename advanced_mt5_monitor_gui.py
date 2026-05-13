@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Advanced MT5 Trading Monitor GUI with Strategy Phase Tracking
@@ -19,6 +19,17 @@ from typing import Dict, List, Optional, Any, Tuple
 import importlib.util
 import queue
 import math
+
+# Gold-specific enhancements module
+try:
+    from gold_enhancements import (
+        validate_gold_session, check_gold_spread, check_higher_tf_trend,
+        check_rsi_divergence, GoldPositionManager, GoldFastPollThread,
+        calculate_gold_lot_size, MAX_ALLOWED_SPREAD_GOLD_POINTS
+    )
+    GOLD_ENHANCEMENTS_AVAILABLE = True
+except ImportError:
+    GOLD_ENHANCEMENTS_AVAILABLE = False
 
 # Try to import charting libraries
 try:
@@ -77,6 +88,19 @@ if not sunrise_signal_adapter:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
     sunrise_signal_adapter = dynamic_import("sunrise_signal_adapter")
 
+# Kelly Criterion Position Sizing (Oracle3 adaptation)
+try:
+    from src.oracle3_kelly import KellySizer, calculate_kelly_risk_amount
+    KELLY_AVAILABLE = True
+except ImportError:
+    try:
+        from oracle3_kelly import KellySizer, calculate_kelly_risk_amount
+        KELLY_AVAILABLE = True
+    except ImportError:
+        KELLY_AVAILABLE = False
+        KellySizer = None  # type: ignore
+        calculate_kelly_risk_amount = None  # type: ignore
+
 # ==========
 # RAY DALIO ALL-WEATHER PORTFOLIO ALLOCATION SYSTEM
 # ==========
@@ -87,17 +111,15 @@ if not sunrise_signal_adapter:
 # - Commodity currency: AUDUSD
 # - JPY exposure: EURJPY, USDJPY (carry trade + BOJ sensitivity)
 #
-# Position sizing formula: Risk = DEFAULT_RISK_PERCENT x allocated_capital
-# Example with $50,000 balance and 1% risk per allocation:
-#   XAUUSD: $50,000 x 15% = $7,500 -> $75.00 risk per trade
-#   USDCHF: $50,000 x 15% = $7,500 -> $75.00 risk per trade
-#   GBPUSD: $50,000 x 12% = $6,000 -> $60.00 risk per trade
-#   EURUSD: $50,000 x 12% = $6,000 -> $60.00 risk per trade
-#   XAGUSD: $50,000 x 12% = $6,000 -> $60.00 risk per trade
-#   EURJPY: $50,000 x 12% = $6,000 -> $60.00 risk per trade
-#   USDJPY: $50,000 x 12% = $6,000 -> $60.00 risk per trade
-#   AUDUSD: $50,000 x 10% = $5,000 -> $50.00 risk per trade
-# Total: 100% allocation across 8 assets
+# Position sizing formula: Risk = DEFAULT_RISK_PERCENT x account_balance
+# (Updated: Risk-first approach per trading_strategy.md spec)
+# Example with $1,000 balance and 1% risk:
+#   Risk per trade = $1,000 x 1% = $10.00
+# Example with $50,000 balance and 1% risk:
+#   Risk per trade = $50,000 x 1% = $500.00
+#
+# NOTE: Dalio allocations below are DEPRECATED for risk calculation
+# but retained for reference / future portfolio diversification features.
 # ==========
 
 ASSET_ALLOCATIONS = {
@@ -111,8 +133,14 @@ ASSET_ALLOCATIONS = {
     'USDJPY': 0.12,   # 12% - JPY core pair (BOJ policy sensitivity)
 }
 
-# Default risk percentage per trade (% of allocated capital, not total portfolio)
-DEFAULT_RISK_PERCENT = 0.01  # 1% of allocated capital (configurable)
+# Default risk percentage per trade (% of TOTAL account balance)
+# Per trading_strategy.md: "risk_per_trade = 1% * account_balance"
+DEFAULT_RISK_PERCENT = 0.01  # 1% of total balance
+
+# R:R Ratio limits (per trading_strategy.md spec)
+# "Risk/Reward ratio: R:R ∈ [1:2, 1:3]"
+MIN_RR_RATIO = 2.0  # Minimum Risk:Reward = 1:2
+MAX_RR_RATIO = 3.0  # Maximum Risk:Reward = 1:3
 
 # Application Version
 APP_VERSION = "1.2.3"
@@ -251,6 +279,53 @@ class AdvancedMT5TradingMonitorGUI:
         self.monitor_thread = None
         self.stop_event = threading.Event()
         self.phase_update_queue = queue.Queue()
+        
+        # Thread-safe state lock (prevents race condition between monitor thread and GUI)
+        self.state_lock = threading.RLock()
+        
+        # Gold Position Manager (trailing stop + partial close)
+        self.gold_position_manager = None
+        # Gold Fast Poll Thread (500ms tick polling during WINDOW_OPEN)
+        self.gold_fast_poll = None
+        self.fast_poll_queue = queue.Queue()
+        if GOLD_ENHANCEMENTS_AVAILABLE:
+            self.gold_position_manager = GoldPositionManager(
+                logger_func=lambda msg, level="INFO", **kw: self.terminal_log(msg, level, critical=True)
+            )
+            self.gold_fast_poll = GoldFastPollThread(
+                logger_func=lambda msg, level="INFO", **kw: self.terminal_log(msg, level, critical=True)
+            )
+        
+        # ==========
+        # KELLY CRITERION POSITION SIZING (Oracle3 Adaptation)
+        # ==========
+        # Replaces fixed 1% risk with dynamic sizing based on
+        # actual win rate and risk-reward ratio from trade history.
+        # Falls back to DEFAULT_RISK_PERCENT when insufficient data.
+        # ==========
+        self.kelly_sizer = None
+        self.kelly_enabled = False
+        if KELLY_AVAILABLE and KellySizer is not None:
+            try:
+                kelly_history_path = os.path.join(
+                    os.path.dirname(__file__), 'logs', 'kelly_trade_history.json'
+                )
+                self.kelly_sizer = KellySizer(
+                    fraction=0.25,           # Quarter-Kelly (conservative)
+                    min_trades=20,           # Need 20 trades before switching
+                    max_risk_percent=0.03,   # Hard cap: 3%
+                    min_risk_percent=0.005,  # Floor: 0.5%
+                    fallback_risk=DEFAULT_RISK_PERCENT,  # Use existing 1% as fallback
+                    lookback_trades=50,      # Rolling window of 50 trades
+                    history_file=kelly_history_path,
+                )
+                self.kelly_enabled = True
+            except Exception as e:
+                logging.warning(f'Kelly Criterion init failed: {e}')
+                self.kelly_sizer = None
+        
+        # Track last known deal tickets to detect newly closed trades
+        self._last_scanned_deal_ticket = 0
         
         # Setup logging
         self.setup_logging()
@@ -461,9 +536,9 @@ class AdvancedMT5TradingMonitorGUI:
         control_frame.pack(fill=tk.X, pady=(0, 5))
         
         ttk.Label(control_frame, text="Chart Symbol:").pack(side=tk.LEFT)
-        self.chart_symbol_var = tk.StringVar(value="EURUSD")
+        self.chart_symbol_var = tk.StringVar(value="XAUUSD")
         chart_symbol_combo = ttk.Combobox(control_frame, textvariable=self.chart_symbol_var, 
-                                         values=["EURUSD", "XAUUSD", "GBPUSD", "AUDUSD", "XAGUSD", "USDCHF", "EURJPY", "USDJPY"],
+                                         values=["XAUUSD"],
                                          state="readonly", width=10)
         chart_symbol_combo.pack(side=tk.LEFT, padx=(5, 10))
         chart_symbol_combo.bind("<<ComboboxSelected>>", self.on_chart_symbol_change)
@@ -604,7 +679,7 @@ class AdvancedMT5TradingMonitorGUI:
 
     def load_strategy_configurations(self):
         """Load strategy configuration parameters"""
-        symbols = ["EURUSD", "GBPUSD", "XAUUSD", "AUDUSD", "XAGUSD", "USDCHF", "EURJPY", "USDJPY"]
+        symbols = ["XAUUSD"]
         
         for symbol in symbols:
             try:
@@ -997,7 +1072,7 @@ class AdvancedMT5TradingMonitorGUI:
                     self.signal_manager = sunrise_signal_adapter.MultiSymbolSignalManager()
                     
                     # Add symbols
-                    symbols = ['XAUUSD', 'EURUSD', 'GBPUSD', 'AUDUSD', 'XAGUSD', 'USDCHF']
+                    symbols = ['XAUUSD']
                     for symbol in symbols:
                         try:
                             self.signal_manager.add_symbol(symbol)
@@ -1280,6 +1355,14 @@ class AdvancedMT5TradingMonitorGUI:
         self.terminal_log("   [OK] Pullback validation (bearish/bullish candles)", "INFO", critical=True)
         self.terminal_log("   [OK] Breakout window monitoring", "INFO", critical=True)
         self.terminal_log("   [OK] Global invalidation (counter-trend crossovers)", "INFO", critical=True)
+        # Log Gold enhancement status
+        if GOLD_ENHANCEMENTS_AVAILABLE:
+            self.terminal_log("   [OK] GOLD Enhancements: Session Filter, Spread Check, MTF, RSI, Trailing Stop", "SUCCESS", critical=True)
+            # Start Gold Position Manager
+            if self.gold_position_manager:
+                self.gold_position_manager.start()
+        else:
+            self.terminal_log("   [--] GOLD Enhancements: Not available (gold_enhancements.py not found)", "WARNING", critical=True)
         self.terminal_log("", "INFO", critical=True)
         self.terminal_log(" Note: Only key events shown. Full log in terminal_log.txt", "INFO", critical=True)
         self.terminal_log(" Hourly summary will be displayed every 60 minutes", "INFO", critical=True)
@@ -1289,6 +1372,14 @@ class AdvancedMT5TradingMonitorGUI:
         """Stop the monitoring process"""
         self.monitoring_active = False
         self.stop_event.set()
+        
+        # Stop Gold Position Manager
+        if self.gold_position_manager:
+            self.gold_position_manager.stop()
+        
+        # Stop Gold Fast-Poll Thread
+        if self.gold_fast_poll and self.gold_fast_poll.is_running:
+            self.gold_fast_poll.stop()
         
         # PERSISTENCE: Save state on stop
         self.save_strategy_state()
@@ -1338,6 +1429,9 @@ class AdvancedMT5TradingMonitorGUI:
                     
                     # PERSISTENCE: Save state after processing candle close
                     self.save_strategy_state()
+                    
+                    # KELLY: Scan for closed trades to update position sizing stats
+                    self.scan_closed_trades_for_kelly()
                     
                     # Update displays after checking all symbols
                     self.root.after(0, self.update_strategy_displays)
@@ -1396,6 +1490,160 @@ class AdvancedMT5TradingMonitorGUI:
                 current_bar = state.get('current_bar', 'N/A')
                 self.terminal_log(f" {symbol}: FAST PATH (WINDOW_OPEN) | Bar: {current_bar} | Window: {window_start}-{window_expiry}", 
                                 "DEBUG", critical=True)
+                
+                # ==========================================================
+                # GOLD FAST-POLL: 500ms tick-level breakout detection for XAUUSD
+                # ==========================================================
+                if symbol == 'XAUUSD' and GOLD_ENHANCEMENTS_AVAILABLE and self.gold_fast_poll:
+                    
+                    # STEP 1: Start fast-poll thread if not already running
+                    if not self.gold_fast_poll.is_running:
+                        window_top = state.get('window_top_limit')
+                        window_bottom = state.get('window_bottom_limit')
+                        armed_direction = state.get('armed_direction', 'LONG')
+                        window_expiry_bar_val = state.get('window_expiry_bar', 999)
+                        
+                        if window_top and window_bottom:
+                            # Clear any stale results from previous sessions
+                            while not self.fast_poll_queue.empty():
+                                try:
+                                    self.fast_poll_queue.get_nowait()
+                                except:
+                                    break
+                            
+                            self.gold_fast_poll.start(
+                                symbol=symbol,
+                                direction=armed_direction,
+                                window_top=window_top,
+                                window_bottom=window_bottom,
+                                window_expiry_bar=window_expiry_bar_val,
+                                result_queue=self.fast_poll_queue
+                            )
+                            self.terminal_log(f"[GOLD] ⚡ {symbol}: Fast-poll thread LAUNCHED | "
+                                            f"Direction={armed_direction} | "
+                                            f"Window [{window_bottom:.2f} - {window_top:.2f}]", 
+                                            "SUCCESS", critical=True)
+                        else:
+                            self.terminal_log(f"[GOLD] {symbol}: Cannot start fast-poll - window limits missing", 
+                                            "WARNING", critical=True)
+                    
+                    # STEP 2: Check queue for fast-poll results (non-blocking)
+                    fast_poll_result = None
+                    try:
+                        fast_poll_result = self.fast_poll_queue.get_nowait()
+                    except:
+                        pass  # Queue empty - no breakout yet
+                    
+                    if fast_poll_result:
+                        # BREAKOUT or FAILURE detected by fast-poll thread!
+                        fp_status = fast_poll_result['status']
+                        fp_price = fast_poll_result['price']
+                        fp_polls = fast_poll_result['polls']
+                        fp_latency = fast_poll_result.get('latency_ms', 0)
+                        
+                        self.terminal_log(f"[GOLD] ⚡ {symbol}: Fast-poll result = {fp_status} | "
+                                        f"Price={fp_price:.2f} | Polls={fp_polls} | "
+                                        f"Latency={fp_latency:.0f}ms", 
+                                        "SUCCESS" if fp_status == 'SUCCESS' else "WARNING", critical=True)
+                        
+                        # Stop the thread (it auto-stops on result, but ensure cleanup)
+                        self.gold_fast_poll.stop()
+                        
+                        # Now do a standard data fetch to get df for determine_strategy_phase
+                        # The state machine needs candle data for filter validation
+                        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 101)
+                        if rates is not None and len(rates) >= 2:
+                            df = pd.DataFrame(rates)
+                            df['time'] = pd.to_datetime(df['time'], unit='s')
+                            df = df.iloc[:-1].copy()  # Remove forming candle
+                            
+                            # Increment bar counter
+                            if len(df) > 0:
+                                current_candle_time = df['time'].iloc[-1]
+                                if 'last_candle_time' not in state or state['last_candle_time'] != current_candle_time:
+                                    state['current_bar'] = state.get('current_bar', 0) + 1
+                                    state['last_candle_time'] = current_candle_time
+                            
+                            # Override the breakout status in state to force the result
+                            # into determine_strategy_phase's WINDOW_OPEN handler
+                            state['_fast_poll_override'] = fp_status
+                            state['_fast_poll_price'] = fp_price
+                            
+                            indicators = state.get('indicators', {})
+                            if indicators:
+                                current_phase = self.determine_strategy_phase(symbol, df, indicators)
+                                
+                                if len(df) > 0:
+                                    indicators['current_price'] = float(df['close'].iloc[-1])
+                                
+                                self.chart_data[symbol] = {
+                                    'df': df.tail(CHART_DISPLAY_BARS),
+                                    'indicators': indicators,
+                                    'timestamp': datetime.now()
+                                }
+                                
+                                if MATPLOTLIB_AVAILABLE and self.chart_symbol_var.get() == symbol:
+                                    self.root.after(0, self.refresh_chart)
+                                
+                                state['indicators'] = indicators
+                                state['last_update'] = datetime.now()
+                            
+                            # Clear the override flag
+                            state.pop('_fast_poll_override', None)
+                            state.pop('_fast_poll_price', None)
+                        else:
+                            self.terminal_log(f"[X] {symbol}: Fast-poll breakout but no candle data!", 
+                                            "ERROR", critical=True)
+                    else:
+                        # No result yet - fast-poll is still running in background
+                        # Still do standard candle check for bar counter + chart update
+                        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 101)
+                        if rates is not None and len(rates) >= 2:
+                            df = pd.DataFrame(rates)
+                            df['time'] = pd.to_datetime(df['time'], unit='s')
+                            df = df.iloc[:-1].copy()
+                            
+                            if len(df) > 0:
+                                current_candle_time = df['time'].iloc[-1]
+                                if 'last_candle_time' not in state or state['last_candle_time'] != current_candle_time:
+                                    state['current_bar'] = state.get('current_bar', 0) + 1
+                                    state['last_candle_time'] = current_candle_time
+                                    self.terminal_log(f" {symbol}: Bar counter incremented to {state['current_bar']}", 
+                                                    "DEBUG", critical=True)
+                                    
+                                    # Check window expiry via bar counter
+                                    exp_bar = state.get('window_expiry_bar', 999)
+                                    if state['current_bar'] > exp_bar:
+                                        self.terminal_log(f"[GOLD] {symbol}: Window EXPIRED (bar {state['current_bar']} > expiry {exp_bar}) - Stopping fast-poll", 
+                                                        "WARNING", critical=True)
+                                        self.gold_fast_poll.stop()
+                                        # Let determine_strategy_phase handle the EXPIRED transition
+                                        indicators = state.get('indicators', {})
+                                        if indicators:
+                                            self.determine_strategy_phase(symbol, df, indicators)
+                                
+                                # Update chart
+                                indicators = state.get('indicators', {})
+                                if indicators and len(df) > 0:
+                                    indicators['current_price'] = float(df['close'].iloc[-1])
+                                    self.chart_data[symbol] = {
+                                        'df': df.tail(CHART_DISPLAY_BARS),
+                                        'indicators': indicators,
+                                        'timestamp': datetime.now()
+                                    }
+                                    if MATPLOTLIB_AVAILABLE and self.chart_symbol_var.get() == symbol:
+                                        self.root.after(0, self.refresh_chart)
+                                    state['indicators'] = indicators
+                                    state['last_update'] = datetime.now()
+                        
+                        self.terminal_log(f"[OK] {symbol}: Fast-poll running in background | No breakout yet", 
+                                        "DEBUG", critical=True)
+                    
+                    return  # Exit early - fast-poll handles XAUUSD WINDOW_OPEN
+                
+                # ==========================================================
+                # STANDARD FAST PATH: For non-XAUUSD symbols (original logic)
+                # ==========================================================
                 
                 # Fast path: Fetch more bars for proper chart display (100 bars for charting)
                 # We need enough data to show the chart properly, not just 2-3 bars
@@ -1529,8 +1777,8 @@ class AdvancedMT5TradingMonitorGUI:
                 if current_phase == 'WAITING_PULLBACK':
                     transition_msg += f" | Signal detected, waiting for pullback"
                 elif current_phase == 'WAITING_BREAKOUT':
-                    import random
-                    pullback_count = random.randint(1, 3)  # Simulate pullback count
+                    # FIX: Use actual pullback count from state instead of random simulation
+                    pullback_count = state.get('pullback_candle_count', 0)
                     state['pullback_count'] = pullback_count
                     transition_msg += f" | Pullback complete ({pullback_count} candles), window opening"
                     state['window_active'] = True
@@ -2595,6 +2843,15 @@ class AdvancedMT5TradingMonitorGUI:
         state['window_expiry_bar'] = None
         state['window_top_limit'] = None
         state['window_bottom_limit'] = None
+        
+        # GOLD FAST-POLL CLEANUP: Stop tick polling when resetting to SCANNING
+        if symbol == 'XAUUSD' and self.gold_fast_poll and self.gold_fast_poll.is_running:
+            self.gold_fast_poll.stop()
+            self.terminal_log(f"[GOLD] {symbol}: Fast-poll stopped (state reset to SCANNING)", "INFO", critical=True)
+        
+        # Clear any fast-poll override flags
+        state.pop('_fast_poll_override', None)
+        state.pop('_fast_poll_price', None)
     
     def _phase3_open_breakout_window(self, symbol, armed_direction, config, current_bar):
         """PHASE 3: Open the two-sided breakout window after pullback confirmation
@@ -2937,104 +3194,123 @@ class AdvancedMT5TradingMonitorGUI:
                 
                 # Transition to ARMED if signal detected
                 if signal_direction:
+                    # GOLD ENHANCEMENT: Block XAUUSD arming during Asian session
+                    if symbol == 'XAUUSD' and GOLD_ENHANCEMENTS_AVAILABLE:
+                        session_ok, session_name = validate_gold_session(current_dt, self.broker_utc_offset)
+                        if not session_ok:
+                            self.terminal_log(f"[GOLD] {symbol}: {signal_direction} crossover IGNORED - {session_name}", 
+                                            "WARNING", critical=True)
+                            signal_direction = None  # Cancel signal
+                    
                     # CRITICAL: Check if pullback system is enabled for this direction
                     use_pullback = False
-                    if signal_direction == 'LONG':
+                    if signal_direction and signal_direction == 'LONG':
                         use_pullback_str = str(config.get('LONG_USE_PULLBACK_ENTRY', 'True')).strip()
                         use_pullback = use_pullback_str.lower() in ['true', '1', 'yes']
                     elif signal_direction == 'SHORT':
                         use_pullback_str = str(config.get('SHORT_USE_PULLBACK_ENTRY', 'True')).strip()
                         use_pullback = use_pullback_str.lower() in ['true', '1', 'yes']
                     
-                    # Get current price for context
-                    current_price = df['close'].iloc[-1] if len(df) > 0 else 0
-                    digits = current_state.get('digits', 5)
+                    # Skip if signal was cancelled (e.g., by gold session filter)
+                    if not signal_direction:
+                        # Clear crossover flags even when skipping to avoid re-triggering
+                        current_state['crossover_data'] = {
+                            'bullish_crossover': False,
+                            'bearish_crossover': False,
+                            'candle_time': crossover_data.get('candle_time', current_dt)
+                        }
                     
-                    # CRITICAL FIX: Clear crossover flags after consuming them FIRST
-                    # This prevents re-arming on the same crossover signal repeatedly
-                    current_state['crossover_data'] = {
-                        'bullish_crossover': False,
-                        'bearish_crossover': False,
-                        'candle_time': crossover_data.get('candle_time', current_dt)
-                    }
+                    if signal_direction:
                     
-                    if use_pullback:
-                        # PULLBACK MODE: Use 3-phase system (ARMED -> WINDOW_OPEN -> ENTRY)
-                        current_state['entry_state'] = f"ARMED_{signal_direction}"
-                        current_state['phase'] = 'WAITING_PULLBACK'
-                        current_state['armed_direction'] = signal_direction
-                        current_state['pullback_candle_count'] = 0
-                        
-                        # Store signal detection ATR for increment/decrement filters (Matches strategy logic)
-                        if 'atr' in indicators and indicators['atr'] is not None:
-                            # indicators['atr'] is a scalar float from calculate_indicators
-                            current_state['signal_detection_atr'] = float(indicators['atr'])
-                        else:
-                            current_state['signal_detection_atr'] = None
-                        
-                        # Store trigger candle (using PREVIOUS closed candle to match Backtrader logic)
-                        # Backtrader stores close[-1] (Bar -1) as trigger candle
-                        # df.iloc[-1] is Bar 0. df.iloc[-2] is Bar -1.
-                        if len(df) >= 2:
-                            idx = -2
-                            arming_candle_time = df['time'].iloc[idx]
+                        # Get current price for context
+                        current_price = df['close'].iloc[-1] if len(df) > 0 else 0
+                        digits = current_state.get('digits', 5)
+                    
+                        # CRITICAL FIX: Clear crossover flags after consuming them FIRST
+                        # This prevents re-arming on the same crossover signal repeatedly
+                        current_state['crossover_data'] = {
+                            'bullish_crossover': False,
+                            'bearish_crossover': False,
+                            'candle_time': crossover_data.get('candle_time', current_dt)
+                        }
+                    
+                        if use_pullback:
+                            # PULLBACK MODE: Use 3-phase system (ARMED -> WINDOW_OPEN -> ENTRY)
+                            current_state['entry_state'] = f"ARMED_{signal_direction}"
+                            current_state['phase'] = 'WAITING_PULLBACK'
+                            current_state['armed_direction'] = signal_direction
+                            current_state['pullback_candle_count'] = 0
                             
-                            current_state['signal_trigger_candle'] = {
-                                'open': float(df['open'].iloc[idx]),
-                                'close': float(df['close'].iloc[idx]),
-                                'high': float(df['high'].iloc[idx]),
-                                'low': float(df['low'].iloc[idx]),
-                                'datetime': arming_candle_time,
-                                'is_bullish': df['close'].iloc[idx] > df['open'].iloc[idx],
-                                'is_bearish': df['close'].iloc[idx] < df['open'].iloc[idx]
-                            }
+                            # Store signal detection ATR for increment/decrement filters (Matches strategy logic)
+                            if 'atr' in indicators and indicators['atr'] is not None:
+                                # indicators['atr'] is a scalar float from calculate_indicators
+                                current_state['signal_detection_atr'] = float(indicators['atr'])
+                            else:
+                                current_state['signal_detection_atr'] = None
                             
-                            # CRITICAL FIX: Mark CURRENT last closed candle as already processed
-                            # The crossover is detected on the current closed candle (index -1)
-                            # We must mark it to prevent checking the arming candle itself for pullbacks
-                            # FIX: Use 'time' column, NOT df.index (which is RangeIndex 0-499)
-                            current_last_candle_time = df['time'].iloc[-1]
-                            current_state['last_pullback_check_candle'] = current_last_candle_time
-                        
-                        # Get pullback requirements
-                        if signal_direction == 'LONG':
-                            max_candles = int(config.get('LONG_PULLBACK_MAX_CANDLES', 2))
-                            pullback_type = "BEARISH (Red)"
-                        else:
-                            max_candles = int(config.get('SHORT_PULLBACK_MAX_CANDLES', 2))
-                            pullback_type = "BULLISH (Green)"
-                        
-                        self.terminal_log(f" {symbol}: {signal_direction} CROSSOVER - State: SCANNING -> ARMED_{signal_direction} | Price: {current_price:.{digits}f}", 
-                                        "SUCCESS", critical=True)
-                        self.terminal_log(f" {symbol}: PULLBACK MODE - Monitoring for {max_candles} {pullback_type} pullback candles...", 
-                                        "INFO", critical=True)
-                        entry_state = f"ARMED_{signal_direction}"
-                        
-                        # INITIALIZE CANDLE SEQUENCE TRACKER - Ensures we never miss candles
-                        current_state['candle_sequence_counter'] = 0
-                        current_state['armed_at_candle_time'] = df['time'].iloc[-1]
-                        self.terminal_log(f" {symbol}: Candle sequence tracker initialized at {current_state['armed_at_candle_time']}", 
-                                        "INFO", critical=True)
-                    else:
-                        # STANDARD MODE: Enter immediately on crossover (no pullback wait)
-                        self.terminal_log(f" {symbol}: {signal_direction} CROSSOVER - STANDARD MODE (No pullback) | Price: {current_price:.{digits}f}", 
-                                        "SUCCESS", critical=True)
-                        self.terminal_log(f" {symbol}: Entering immediately (pullback system disabled)", 
-                                        "INFO", critical=True)
-                        
-                        # Execute entry directly
-                        entry_success = self._execute_entry(symbol, signal_direction, df, current_dt, config)
-                        
-                        if entry_success:
-                            self.terminal_log(f"[OK] {symbol}: STANDARD ENTRY executed at {current_price:.{digits}f}", 
+                            # Store trigger candle (using PREVIOUS closed candle to match Backtrader logic)
+                            # Backtrader stores close[-1] (Bar -1) as trigger candle
+                            # df.iloc[-1] is Bar 0. df.iloc[-2] is Bar -1.
+                            if len(df) >= 2:
+                                idx = -2
+                                arming_candle_time = df['time'].iloc[idx]
+                                
+                                current_state['signal_trigger_candle'] = {
+                                    'open': float(df['open'].iloc[idx]),
+                                    'close': float(df['close'].iloc[idx]),
+                                    'high': float(df['high'].iloc[idx]),
+                                    'low': float(df['low'].iloc[idx]),
+                                    'datetime': arming_candle_time,
+                                    'is_bullish': df['close'].iloc[idx] > df['open'].iloc[idx],
+                                    'is_bearish': df['close'].iloc[idx] < df['open'].iloc[idx]
+                                }
+                                
+                                # CRITICAL FIX: Mark CURRENT last closed candle as already processed
+                                # The crossover is detected on the current closed candle (index -1)
+                                # We must mark it to prevent checking the arming candle itself for pullbacks
+                                # FIX: Use 'time' column, NOT df.index (which is RangeIndex 0-499)
+                                current_last_candle_time = df['time'].iloc[-1]
+                                current_state['last_pullback_check_candle'] = current_last_candle_time
+                            
+                            # Get pullback requirements
+                            if signal_direction == 'LONG':
+                                max_candles = int(config.get('LONG_PULLBACK_MAX_CANDLES', 2))
+                                pullback_type = "BEARISH (Red)"
+                            else:
+                                max_candles = int(config.get('SHORT_PULLBACK_MAX_CANDLES', 2))
+                                pullback_type = "BULLISH (Green)"
+                            
+                            self.terminal_log(f" {symbol}: {signal_direction} CROSSOVER - State: SCANNING -> ARMED_{signal_direction} | Price: {current_price:.{digits}f}", 
                                             "SUCCESS", critical=True)
+                            self.terminal_log(f" {symbol}: PULLBACK MODE - Monitoring for {max_candles} {pullback_type} pullback candles...", 
+                                            "INFO", critical=True)
+                            entry_state = f"ARMED_{signal_direction}"
+                            
+                            # INITIALIZE CANDLE SEQUENCE TRACKER - Ensures we never miss candles
+                            current_state['candle_sequence_counter'] = 0
+                            current_state['armed_at_candle_time'] = df['time'].iloc[-1]
+                            self.terminal_log(f" {symbol}: Candle sequence tracker initialized at {current_state['armed_at_candle_time']}", 
+                                            "INFO", critical=True)
                         else:
-                            self.terminal_log(f"[X] {symbol}: STANDARD ENTRY failed - Reset to SCANNING", 
-                                            "ERROR", critical=True)
-                        
-                        # Reset state to SCANNING after entry attempt
-                        self._reset_entry_state(symbol)
-                        entry_state = 'SCANNING'
+                            # STANDARD MODE: Enter immediately on crossover (no pullback wait)
+                            self.terminal_log(f" {symbol}: {signal_direction} CROSSOVER - STANDARD MODE (No pullback) | Price: {current_price:.{digits}f}", 
+                                            "SUCCESS", critical=True)
+                            self.terminal_log(f" {symbol}: Entering immediately (pullback system disabled)", 
+                                            "INFO", critical=True)
+                            
+                            # Execute entry directly
+                            entry_success = self._execute_entry(symbol, signal_direction, df, current_dt, config)
+                            
+                            if entry_success:
+                                self.terminal_log(f"[OK] {symbol}: STANDARD ENTRY executed at {current_price:.{digits}f}", 
+                                                "SUCCESS", critical=True)
+                            else:
+                                self.terminal_log(f"[X] {symbol}: STANDARD ENTRY failed - Reset to SCANNING", 
+                                                "ERROR", critical=True)
+                            
+                            # Reset state to SCANNING after entry attempt
+                            self._reset_entry_state(symbol)
+                            entry_state = 'SCANNING'
             
             # ---------------------------------------------------------------
             # PHASE 2: ARMED -> WINDOW_OPEN (Pullback Confirmation)
@@ -3288,7 +3564,15 @@ class AdvancedMT5TradingMonitorGUI:
                 self.terminal_log(f" {symbol}: WINDOW_OPEN phase | Direction={armed_direction} | Bar={current_bar} | DF_len={len(df)}", 
                                 "DEBUG", critical=True)
                 
-                breakout_status = self._phase4_monitor_window(symbol, df, armed_direction, current_bar, current_dt, config)
+                # GOLD FAST-POLL OVERRIDE: Use tick-level result instead of candle check
+                fast_poll_override = current_state.get('_fast_poll_override')
+                if fast_poll_override:
+                    breakout_status = fast_poll_override
+                    fp_price = current_state.get('_fast_poll_price', 0)
+                    self.terminal_log(f"[GOLD] ⚡ {symbol}: Using FAST-POLL override | Status={breakout_status} | TickPrice={fp_price:.2f}", 
+                                    "SUCCESS" if breakout_status == 'SUCCESS' else "WARNING", critical=True)
+                else:
+                    breakout_status = self._phase4_monitor_window(symbol, df, armed_direction, current_bar, current_dt, config)
                 
                 # DEBUG: Breakout status result
                 self.terminal_log(f" {symbol}: Window check result = {breakout_status}", 
@@ -3391,10 +3675,86 @@ class AdvancedMT5TradingMonitorGUI:
                             self._reset_entry_state(symbol)
                             entry_state = 'SCANNING'
                             trade_executed = False
+                        
+                        # ==========
+                        # GOLD-SPECIFIC ENHANCEMENT FILTERS (only for XAUUSD)
+                        # ==========
+                        elif symbol == 'XAUUSD' and GOLD_ENHANCEMENTS_AVAILABLE and time_filter_passed:
+                            gold_pass = True
+                            
+                            # GOLD FILTER 1: Session/Killzone Check
+                            session_ok, session_name = validate_gold_session(current_dt, self.broker_utc_offset)
+                            if not session_ok:
+                                self.terminal_log(f"[GOLD] {symbol}: BLOCKED by Session Filter - {session_name}", 
+                                                "WARNING", critical=True)
+                                gold_pass = False
+                            else:
+                                self.terminal_log(f"[GOLD] {symbol}: Session OK ({session_name})", "SUCCESS", critical=True)
+                            
+                            # GOLD FILTER 2: Spread Protection
+                            if gold_pass:
+                                spread_ok, spread_pts = check_gold_spread(symbol)
+                                if not spread_ok:
+                                    self.terminal_log(f"[GOLD] {symbol}: BLOCKED by Spread ({spread_pts:.0f} pts > {MAX_ALLOWED_SPREAD_GOLD_POINTS})", 
+                                                    "WARNING", critical=True)
+                                    gold_pass = False
+                                else:
+                                    self.terminal_log(f"[GOLD] {symbol}: Spread OK ({spread_pts:.0f} pts)", "SUCCESS", critical=True)
+                            
+                            # GOLD FILTER 3: Multi-Timeframe Alignment (H1 + H4)
+                            if gold_pass:
+                                mtf_ok, mtf_details = check_higher_tf_trend(symbol, armed_direction)
+                                h1_info = mtf_details.get('H1', {})
+                                h4_info = mtf_details.get('H4', {})
+                                if not mtf_ok:
+                                    self.terminal_log(f"[GOLD] {symbol}: BLOCKED by MTF - H1:{h1_info.get('trend','?')} H4:{h4_info.get('trend','?')} vs {armed_direction}", 
+                                                    "WARNING", critical=True)
+                                    gold_pass = False
+                                else:
+                                    self.terminal_log(f"[GOLD] {symbol}: MTF Aligned - H1:{h1_info.get('trend','?')} H4:{h4_info.get('trend','?')}", 
+                                                    "SUCCESS", critical=True)
+                            
+                            # GOLD FILTER 4: RSI Divergence (Anti-Fakeout)
+                            if gold_pass:
+                                rsi_ok, rsi_details = check_rsi_divergence(symbol, armed_direction)
+                                if not rsi_ok:
+                                    self.terminal_log(f"[GOLD] {symbol}: BLOCKED by RSI Divergence - {rsi_details.get('msg', 'divergence detected')}", 
+                                                    "WARNING", critical=True)
+                                    gold_pass = False
+                                else:
+                                    self.terminal_log(f"[GOLD] {symbol}: RSI OK ({rsi_details.get('current_rsi', 0):.0f})", 
+                                                    "SUCCESS", critical=True)
+                            
+                            if not gold_pass:
+                                self.terminal_log(f"[GOLD] {symbol}: ENTRY ABORTED - Gold enhancement filter failed", 
+                                                "WARNING", critical=True)
+                                self._reset_entry_state(symbol)
+                                entry_state = 'SCANNING'
+                                trade_executed = False
+                            else:
+                                # All gold filters passed - Execute trade
+                                entry_price = current_close
+                                trade_executed = self.execute_trade(symbol, armed_direction, entry_price, config)
+                                
+                                # Register with Gold Position Manager for trailing/partial close
+                                if trade_executed and self.gold_position_manager:
+                                    positions = mt5.positions_get(symbol=symbol)
+                                    if positions and len(positions) > 0:
+                                        pos = positions[0]
+                                        self.gold_position_manager.track_position(
+                                            ticket=pos.ticket,
+                                            entry_price=pos.price_open,
+                                            sl_price=pos.sl,
+                                            tp_price=pos.tp,
+                                            direction=armed_direction,
+                                            volume=pos.volume
+                                        )
+                        
                         else:
-                            # Execute trade in MT5 at close price (backtrader behavior)
-                            entry_price = current_close
-                            trade_executed = self.execute_trade(symbol, armed_direction, entry_price, config)
+                            # Non-XAUUSD or gold enhancements not available: standard execution
+                            if time_filter_passed:
+                                entry_price = current_close
+                                trade_executed = self.execute_trade(symbol, armed_direction, entry_price, config)
                     
                     if trade_executed:
                         self.terminal_log(f" {symbol}: Trade executed successfully!", "SUCCESS", critical=True)
@@ -4301,6 +4661,12 @@ class AdvancedMT5TradingMonitorGUI:
             # ==========
             # Calculate position size using asset-specific allocation
             # Risk = risk_percent x allocated_capital (NOT total portfolio)
+            #
+            # KELLY CRITERION UPGRADE (Oracle3):
+            # When kelly_enabled=True AND enough trade history exists,
+            # risk_percent is dynamically calculated from:
+            #   kelly% = W - (1-W)/R   (W=win_rate, R=avg_win/avg_loss)
+            # Otherwise falls back to DEFAULT_RISK_PERCENT (1%).
             # ==========
             
             # Get real-time account balance from MT5
@@ -4310,12 +4676,28 @@ class AdvancedMT5TradingMonitorGUI:
             allocation_percent = ASSET_ALLOCATIONS.get(symbol, 0.16)
             allocated_capital = balance * allocation_percent
             
-            # Get risk percentage (configurable per strategy, default 1%)
-            # This is % of ALLOCATED capital, not total portfolio
-            risk_percent = config.get('RISK_PER_TRADE', DEFAULT_RISK_PERCENT)
-            
-            # Calculate risk amount based on allocated capital
-            risk_amount = allocated_capital * risk_percent
+            # === KELLY CRITERION RISK CALCULATION ===
+            if self.kelly_enabled and self.kelly_sizer is not None and calculate_kelly_risk_amount is not None:
+                # Use Kelly-optimal risk percentage
+                risk_amount, risk_percent, kelly_summary = calculate_kelly_risk_amount(
+                    kelly_sizer=self.kelly_sizer,
+                    balance=balance,
+                    allocation_percent=allocation_percent,
+                    symbol=symbol,
+                    default_risk_percent=config.get('RISK_PER_TRADE', DEFAULT_RISK_PERCENT),
+                )
+                self.terminal_log(
+                    f" {symbol}: KELLY CRITERION sizing active",
+                    "INFO", critical=True
+                )
+                self.terminal_log(
+                    f"   {kelly_summary}",
+                    "INFO", critical=True
+                )
+            else:
+                # Fallback: fixed risk percentage (original behavior)
+                risk_percent = config.get('RISK_PER_TRADE', DEFAULT_RISK_PERCENT)
+                risk_amount = allocated_capital * risk_percent
             
             # Log allocation details for transparency
             self.terminal_log(
@@ -4367,38 +4749,21 @@ class AdvancedMT5TradingMonitorGUI:
                             "INFO", critical=True)
             
             # Calculate lot size based on risk
-            # For commodities (XAUUSD, XAGUSD): 1 lot = contract_size units (e.g., 100 oz)
-            # For forex (EURUSD, etc.): 1 lot = 100,000 units
-            # Formula: lot_size = risk_amount / (sl_distance_in_price x pip_value_per_lot)
-            
             point = symbol_info.point
-            contract_size = symbol_info.trade_contract_size  # 100 for XAUUSD, 100000 for EURUSD/GBPUSD
-            tick_value = symbol_info.trade_tick_value  # Value per tick in account currency
+            contract_size = symbol_info.trade_contract_size
+            tick_value = symbol_info.trade_tick_value
             tick_size = symbol_info.trade_tick_size
             
-            # CRITICAL FIX: Use MT5's tick_value directly (it's correct per broker contract specs)
-            # The formula is: lot_size = risk / (sl_distance_points x tick_value_per_tick x ticks_per_point)
-            # Simplified: lot_size = risk / (sl_distance_in_points x value_per_point)
-            
             # Calculate value per point from MT5 symbol info
-            # tick_value = value change per tick in account currency
-            # tick_size = minimum price change (tick)
-            # point = minimum price representation (usually same as tick_size)
-            
             if tick_size > 0 and point > 0:
-                # Value per point = tick_value x (point / tick_size)
-                # For most symbols: point == tick_size, so value_per_point = tick_value
                 value_per_point = tick_value * (point / tick_size)
             else:
-                # Fallback if tick data is invalid
                 value_per_point = tick_value if tick_value > 0 else 0.01
             
-            # Calculate SL distance in points (not pips!)
-            # point = minimum price unit (e.g., 0.00001 for EURUSD, 0.01 for XAUUSD, 0.001 for XAGUSD)
+            # Calculate SL distance in points
             sl_distance_in_points = sl_distance / point
             
-            # Calculate lot size using broker-specific values
-            # Formula: lot_size = risk_amount / (sl_distance_in_points x value_per_point)
+            # Calculate lot size
             if value_per_point > 0 and sl_distance_in_points > 0:
                 lot_size = risk_amount / (sl_distance_in_points * value_per_point)
             else:
@@ -4407,41 +4772,22 @@ class AdvancedMT5TradingMonitorGUI:
             
             # Position Sizing Calculation with Detailed Logging
             self.terminal_log(f"==========", "INFO", critical=True)
-            self.terminal_log(f"? {symbol}: POSITION SIZING CALCULATION", "INFO", critical=True)
+            self.terminal_log(f"  {symbol}: POSITION SIZING CALCULATION", "INFO", critical=True)
             self.terminal_log(f"==========", "INFO", critical=True)
             
-            # Broker Symbol Specifications
             self.terminal_log(f" BROKER SPECIFICATIONS:", "DEBUG", critical=True)
             self.terminal_log(f"   Symbol: {symbol} | Digits: {symbol_info.digits}", "DEBUG", critical=True)
             self.terminal_log(f"   Contract Size: {contract_size:,.0f}", "DEBUG", critical=True)
-            self.terminal_log(f"   Point: {point:.5f} (minimum price unit)", "DEBUG", critical=True)
-            self.terminal_log(f"   Tick Size: {tick_size:.5f} (minimum price change)", "DEBUG", critical=True)
-            self.terminal_log(f"   Tick Value: ${tick_value:.5f} (profit per tick)", "DEBUG", critical=True)
+            self.terminal_log(f"   Point: {point:.5f} | Tick Size: {tick_size:.5f} | Tick Value: ${tick_value:.5f}", "DEBUG", critical=True)
             self.terminal_log(f"   Calculated Value per Point: ${value_per_point:.5f}", "DEBUG", critical=True)
             
-            # Dalio Allocation
-            self.terminal_log(f"? DALIO ALLOCATION:", "DEBUG", critical=True)
-            self.terminal_log(f"   Portfolio Balance: ${balance:,.2f}", "DEBUG", critical=True)
-            self.terminal_log(f"   Asset Allocation: {allocation_percent*100:.0f}% -> ${allocated_capital:,.2f}", "DEBUG", critical=True)
-            self.terminal_log(f"   Risk per Trade: {risk_percent*100:.1f}% of allocated -> ${risk_amount:.2f}", "DEBUG", critical=True)
-            
-            # Stop Loss Distance
-            self.terminal_log(f" STOP LOSS:", "DEBUG", critical=True)
-            self.terminal_log(f"   SL Distance (price): {sl_distance:.5f}", "DEBUG", critical=True)
-            self.terminal_log(f"   SL Distance (points): {sl_distance_in_points:.1f}", "DEBUG", critical=True)
-            self.terminal_log(f"   ATR Multiplier: {atr_sl_multiplier:.1f}", "DEBUG", critical=True)
-            
-            # Position Size Calculation
             self.terminal_log(f" LOT SIZE FORMULA:", "DEBUG", critical=True)
             self.terminal_log(f"   lot_size = risk_amount / (sl_distance_points x value_per_point)", "DEBUG", critical=True)
             self.terminal_log(f"   lot_size = ${risk_amount:.2f} / ({sl_distance_in_points:.1f} x ${value_per_point:.5f})", "DEBUG", critical=True)
-            self.terminal_log(f"   lot_size = ${risk_amount:.2f} / {sl_distance_in_points * value_per_point:.5f}", "DEBUG", critical=True)
             self.terminal_log(f"   lot_size = {lot_size:.6f} lots (BEFORE limits)", "DEBUG", critical=True)
             
             # Risk Verification
             actual_risk_check = lot_size * sl_distance_in_points * value_per_point
-            self.terminal_log(f"[OK] RISK VERIFICATION:", "DEBUG", critical=True)
-            self.terminal_log(f"   {lot_size:.6f} lots x {sl_distance_in_points:.1f} points x ${value_per_point:.5f} = ${actual_risk_check:.2f}", "DEBUG", critical=True)
             risk_diff = abs(actual_risk_check - risk_amount)
             if risk_diff < 0.50:
                 self.terminal_log(f"   [OK] VERIFIED: Actual risk ${actual_risk_check:.2f} matches expected ${risk_amount:.2f}", "INFO", critical=True)
@@ -4456,10 +4802,9 @@ class AdvancedMT5TradingMonitorGUI:
             # Round to valid lot step
             lot_size = round(lot_size / lot_step) * lot_step
             
-            # Apply broker's min/max limits (removed 0.1 cap!)
+            # Apply broker's min/max limits
             lot_size = max(lot_min, min(lot_size, lot_max))
             
-            # Log final volume after limits
             self.terminal_log(f"   Final Volume: {lot_size:.6f} lots (min={lot_min}, max={lot_max}, step={lot_step})", "DEBUG", critical=True)
             
             # Prepare order parameters
@@ -4478,15 +4823,12 @@ class AdvancedMT5TradingMonitorGUI:
             sl_price = round(sl_price, digits)
             tp_price = round(tp_price, digits)
             
-            # CRITICAL FIX: Detect broker's supported filling mode
-            # Error 10030 = INVALID_FILL occurs when using unsupported filling mode
+            # Detect broker's supported filling mode
             symbol_info = mt5.symbol_info(symbol)  # type: ignore
             if symbol_info is None:
                 self.terminal_log(f"[X] {symbol}: Cannot get symbol info", "ERROR", critical=True)
                 return False
             
-            # Determine filling mode based on broker's support
-            # filling_mode flags: 1=FOK, 2=IOC, 4=RETURN (can be combined)
             filling_type = None
             if symbol_info.filling_mode & 2:  # IOC supported
                 filling_type = mt5.ORDER_FILLING_IOC  # type: ignore
@@ -4495,7 +4837,6 @@ class AdvancedMT5TradingMonitorGUI:
             elif symbol_info.filling_mode & 4:  # RETURN supported
                 filling_type = mt5.ORDER_FILLING_RETURN  # type: ignore
             else:
-                # Fallback to FOK
                 filling_type = mt5.ORDER_FILLING_FOK  # type: ignore
             
             self.terminal_log(f" {symbol}: Using filling mode {filling_type} (broker supports: {symbol_info.filling_mode})", 
@@ -4514,7 +4855,7 @@ class AdvancedMT5TradingMonitorGUI:
                 "magic": 234000,
                 "comment": f"Sunrise_{direction}",
                 "type_time": mt5.ORDER_TIME_GTC,  # type: ignore
-                "type_filling": filling_type,  # Use broker-compatible mode
+                "type_filling": filling_type,
             }
             
             # Log trade details
@@ -4540,11 +4881,129 @@ class AdvancedMT5TradingMonitorGUI:
             self.terminal_log(f"   Order: #{result.order} | Deal: #{result.deal}", "SUCCESS", critical=True)
             self.terminal_log(f"   Volume: {result.volume} lots @ {result.price}", "SUCCESS", critical=True)
             
+            # Store entry info for Kelly tracking when position closes
+            if self.kelly_enabled and self.kelly_sizer is not None:
+                if not hasattr(self, '_open_trade_risk'):
+                    self._open_trade_risk = {}
+                self._open_trade_risk[symbol] = {
+                    'risk_amount': risk_amount,
+                    'entry_price': result.price,
+                    'direction': direction,
+                    'ticket': result.order,
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                }
+            
+            # REGISTER for 4-level TP splitting (GoldPositionManager)
+            if self.gold_position_manager:
+                try:
+                    # Use the actual fill price from MT5 (may differ slightly from requested)
+                    actual_entry = result.price if result.price > 0 else price
+                    self.gold_position_manager.track_position(
+                        ticket=result.order,
+                        entry_price=actual_entry,
+                        sl_price=sl_price,
+                        tp_price=tp_price,
+                        direction=direction,
+                        volume=result.volume
+                    )
+                    self.terminal_log(f"[GOLD] 📊 {symbol}: Position #{result.order} registered for 4-level TP splitting", 
+                                    "SUCCESS", critical=True)
+                except Exception as track_err:
+                    self.terminal_log(f"[GOLD] {symbol}: Failed to register TP tracking: {str(track_err)}", 
+                                    "WARNING", critical=True)
+            
             return True
             
         except Exception as e:
             self.terminal_log(f"[X] {symbol}: Trade execution error: {str(e)}", "ERROR", critical=True)
             return False
+    
+    def scan_closed_trades_for_kelly(self):
+        """Scan MT5 deal history for closed trades and record them for Kelly stats.
+        
+        This method checks for newly closed positions (by SL, TP, or manual close)
+        and feeds their P&L data to the Kelly sizer so it can update its win rate
+        and risk-reward statistics in real time.
+        
+        Called periodically from the monitoring loop.
+        """
+        if not self.kelly_enabled or self.kelly_sizer is None:
+            return
+        
+        if not mt5 or not self.mt5_connected:
+            return
+        
+        if not hasattr(self, '_open_trade_risk'):
+            self._open_trade_risk = {}
+            return
+        
+        try:
+            # Check each tracked open trade to see if its position still exists
+            symbols_to_remove = []
+            
+            for symbol, trade_info in self._open_trade_risk.items():
+                positions = mt5.positions_get(symbol=symbol)  # type: ignore
+                
+                # If no position exists for this symbol, it was closed
+                if positions is None or len(positions) == 0:
+                    # Get the deal history for this ticket to find the P&L
+                    ticket = trade_info.get('ticket', 0)
+                    risk_amount = trade_info.get('risk_amount', 0)
+                    direction = trade_info.get('direction', 'LONG')
+                    entry_price = trade_info.get('entry_price', 0)
+                    
+                    if ticket and risk_amount > 0:
+                        # Try to get the closing deal from history
+                        from datetime import timezone
+                        deals = mt5.history_deals_get(  # type: ignore
+                            datetime.now() - timedelta(days=7),
+                            datetime.now()
+                        )
+                        
+                        pnl = 0.0
+                        exit_price = 0.0
+                        
+                        if deals:
+                            # Find the closing deal for this position
+                            for deal in reversed(deals):
+                                if (deal.symbol == symbol and 
+                                    deal.entry == 1 and  # 1 = DEAL_ENTRY_OUT (closing)
+                                    deal.position_id == ticket):
+                                    pnl = deal.profit
+                                    exit_price = deal.price
+                                    break
+                        
+                        if pnl != 0 or exit_price != 0:
+                            # Record the trade for Kelly statistics
+                            self.kelly_sizer.record_trade(
+                                pnl=pnl,
+                                risk_amount=risk_amount,
+                                symbol=symbol,
+                                direction=direction,
+                                entry_price=entry_price,
+                                exit_price=exit_price,
+                            )
+                            
+                            result_str = f"+${pnl:.2f}" if pnl > 0 else f"-${abs(pnl):.2f}"
+                            self.terminal_log(
+                                f" [KELLY] {symbol}: Trade closed | P&L: {result_str} | "
+                                f"Risk was ${risk_amount:.2f} | "
+                                f"{'WIN' if pnl > 0 else 'LOSS'}",
+                                "INFO", critical=True
+                            )
+                            
+                            # Show updated Kelly stats
+                            summary = self.kelly_sizer.get_summary(symbol=symbol)
+                            self.terminal_log(f"   {summary}", "INFO", critical=True)
+                    
+                    symbols_to_remove.append(symbol)
+            
+            # Clean up closed trade tracking
+            for symbol in symbols_to_remove:
+                del self._open_trade_risk[symbol]
+                
+        except Exception as e:
+            logging.warning(f'Kelly scan error: {e}')
     
     def disconnect_mt5(self):
         """Disconnect from MT5"""

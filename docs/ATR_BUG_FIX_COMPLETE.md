@@ -148,7 +148,6 @@ self.terminal_log(f"   ATR: {atr:.5f} | SL_Multi: {atr_sl_multiplier} | TP_Multi
 [06:10:01.515]    Order: #12345678 | Deal: #87654321
 [06:10:01.530]    Volume: 0.01 lots @ 48.812
 ```
-
 ---
 
 ## Verification Checklist
