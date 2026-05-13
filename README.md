@@ -1,468 +1,107 @@
-﻿# MT5 Live Trading Bot
+# 🥇 MT5 Live Trading Bot: Advanced XAUUSD Engine
+*Institutional-grade automated trading system, exclusively optimized for Gold (XAUUSD) on MetaTrader 5.*
 
-> **Institutional-grade automated trading system implementing Ray Dalio's All-Weather Portfolio allocation**
+**Python 3.8+ | MetaTrader 5 | License: MIT**
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![MetaTrader 5](https://img.shields.io/badge/MetaTrader-5-green.svg)](https://www.metatrader5.com/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-![MT5 Advanced Monitor GUI](docs/Advanced%20MT5%20Monitor.png)
+![Advanced MT5 Monitor GUI](https://img.shields.io/badge/GUI-Advanced_Monitor-blue) ![Asset](https://img.shields.io/badge/Asset-XAUUSD_Exclusive-gold) ![Risk](https://img.shields.io/badge/Risk-1%25_Hard_Cap-red)
 
 ---
 
 ## 🎯 What This Bot Does
+This bot is a highly specialized, autonomous trading engine dedicated strictly to **XAUUSD (Gold)**. It abandons multi-pair diversification in favor of extreme precision, scaling capabilities, and aggressive risk management on a single high-volatility asset.
 
-**Automated trading system** for MetaTrader 5 with:
-- 📊 **Ray Dalio Portfolio Allocation** - Economic scenario-based position sizing across 8 assets (18% XAUUSD, 15% USDCHF/AUDUSD, 13% GBPUSD, 12% EURUSD/XAGUSD, 8% USDJPY, 7% EURJPY)
-- 🛡️ **6-Layer Entry Filters** - Validates ATR, Angle, Price, Candle Direction, EMA Ordering, and Time before every trade
-- 🎨 **Real-Time GUI** - Live charts, EMA overlays, strategy states, and comprehensive monitoring
-- 📈 **4-Phase State Machine** - SCANNING → ARMED → WINDOW_OPEN → ENTRY with pullback confirmation
-- 💰 **MT5 Broker Integration** - Dynamic position sizing using broker-specific tick values (not hardcoded pip values)
-
-**Trading Assets:** EURUSD, GBPUSD, XAUUSD, AUDUSD, XAGUSD, USDCHF, EURJPY, USDJPY (M5 timeframe)
+### 🔥 Key Features (Latest Updates)
+* 🛡️ **Risk-First Management:** Hard-coded **1% maximum account risk** per trade. Lot sizing is dynamically calculated based on the SL distance and real broker tick values.
+* 💰 **4-Level TP Splitting:** Profits are secured progressively at 4 levels: **30% / 20% / 30% / 20%**.
+* 🔒 **Auto-Breakeven:** Once TP2 (50% of the trade) is reached, Stop Loss is instantly moved to the entry price, securing a Risk-Free trade.
+* 🚀 **Scaling Engine (Nhồi lệnh):** Capitalizes on massive trends by adding up to **3 additional scaling orders** (pyramiding) if the initial trade is winning and the H1 candle shows extreme momentum (Body ≥ 75%).
+* ⚡ **Ultra-Fast Polling:** Latency reduced from 5 seconds to **500ms** during the Breakout Window to catch Gold's explosive movements instantly.
+* 📊 **Spread Safety Lock:** Monitors live broker spread and absolutely refuses to trade if the spread exceeds **80 points ($0.80)** during news spikes.
+* 🕒 **24/5 Operations:** Fully unchained time limits; trades all valid configurations during the 24/5 market open.
 
 ---
 
 ## 🚀 Quick Start
 
 ### 1. Installation
-
 ```powershell
 # Clone repository
-git clone https://github.com/yourusername/mt5_live_trading_bot.git
-cd mt5_live_trading_bot
+git clone https://github.com/ndai0454-gif/mt5_bot_trading_optimize.git
+cd mt5_bot_trading_optimize
 
-# Automated setup (Windows PowerShell - Recommended)
-.\setup.ps1
-
-# OR Manual setup
-python -m venv venv
-venv\Scripts\activate
+# Install dependencies
 pip install -r requirements.txt
 ```
 
 ### 2. Configuration
+1. Open your MetaTrader 5 Terminal and log into your **Demo Account**.
+2. Ensure **"Allow algorithmic trading"** is enabled in MT5 settings (`Ctrl+O` -> Expert Advisors).
+3. Ensure **XAUUSD** is visible in your Market Watch (`Ctrl+U`).
 
-```bash
-# Copy MT5 credentials template
-copy config\mt5_credentials_template.json config\mt5_credentials.json
-
-# Edit with your MT5 account details
-# (account number, password, server)
-```
+*(Optional: Edit `config/mt5_credentials.json` if you wish to let the bot auto-login)*
 
 ### 3. Launch
-
-```bash
+```powershell
 # Start the trading bot
 python advanced_mt5_monitor_gui.py
-
-# OR run executable (Windows)
-dist\MT5_Trading_Bot.exe
 ```
+*In the GUI, click **Connect**, ensure XAUUSD is selected, and click **Start**.*
 
 ---
 
-## 📊 System Architecture
+## 📈 System Architecture & Mechanics
 
-### Ray Dalio All-Weather Portfolio Allocation
+### The 4-Phase State Machine
+1. `[SCANNING]` → Scanning for valid EMA Crossovers (Fast/Med/Slow) and RSI alignment.
+2. `[ARMED]` → Signal detected. Waiting for 1-3 pullback candles to confirm direction.
+3. `[WINDOW_OPEN]` → Polling at **500ms**. Waiting for price to break the confirmation boundary.
+4. `[IN_POSITION]` → Trade executed. `GoldPositionManager` takes over for TP splitting and scaling.
 
-**Economic scenario-based position sizing** protecting against inflation, deflation, growth, and recession:
-
-| Asset | Allocation | Economic Role | Example Risk* |
-|-------|-----------|---------------|---------------|
-| **XAUUSD** | 18% | Inflation hedge (gold) | $90.14 |
-| **USDCHF** | 15% | Deflation hedge (safe haven) | $75.12 |
-| **GBPUSD** | 13% | Balanced growth | $65.10 |
-| **EURUSD** | 12% | Balanced growth | $60.09 |
-| **XAGUSD** | 12% | Commodity exposure | $60.09 |
-| **AUDUSD** | 15% | Commodity currency | $75.12 |
-| **USDJPY** | 8% | JPY carry trade | $40.06 |
-| **EURJPY** | 7% | JPY cross exposure | $35.05 |
-
-*Based on $50,078 portfolio with 1% risk per allocation
-
-**Key Benefit:** Maximum 1% total portfolio risk even if all 8 assets signal simultaneously (vs 8% with equal weighting)
-
-📖 **Full Documentation:** [DALIO_ALLOCATION_SYSTEM.md](docs/DALIO_ALLOCATION_SYSTEM.md)
+### Scaling Engine Logic (Pyramiding)
+*Only adds risk when winning.*
+* **Trigger:** The base order hits TP2.
+* **Validation:** Checks the **H1 Timeframe**. The H1 candle must be aligned with the trade direction, and its body must represent at least **75%** of the entire candle (Wick-to-Wick), proving massive institutional momentum.
+* **Execution:** A new sub-order is placed with its own 1% risk SL/TP parameters. Stop Loss of previous orders are trailed.
 
 ---
 
-### 6-Layer Entry Filter Cascade
-
-Every signal must pass **ALL** filters to prevent false entries. Filters are applied in two stages:
-
-**Stage 1: Crossover Validation (Scanning)**
-```
-EMA Crossover Detected
-    ↓
-✅ [1] ATR Filter      → Volatility in valid range?
-✅ [2] Angle Filter    → EMA slope meets requirements?
-✅ [3] Price Filter    → Price aligned with trend?
-✅ [4] Candle Filter   → Previous candle confirms momentum?
-✅ [5] EMA Ordering    → Multi-EMA sequence correct?
-    ↓
-ALL PASSED → ARMED State → Pullback → Window
-ANY FAILED → REJECTED (stay in SCANNING)
-```
-
-**Stage 2: Entry Validation (Window Breakout)**
-```
-Window Breakout Detected
-    ↓
-✅ [6] Time Filter     → Within trading hours?
-    ↓
-PASSED → ENTRY
-FAILED → SKIP (Return to SCANNING)
-```
-
-**Impact:** Reduces entries from ~240/month to ~2-3/month per asset (matches backtesting)
-
-📊 **Filter Configuration:** [FILTER_CONFIGURATION.md](docs/archive/FILTER_CONFIGURATION.md)
-
----
-
-### 4-Phase State Machine
+## 📁 Project Structure (Cleaned)
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ SCANNING → Monitoring for valid crossovers (6-layer check) │
-└─────────────────────────────────────────────────────────────┘
-                          ↓ All filters pass
-┌─────────────────────────────────────────────────────────────┐
-│ ARMED → Waiting for pullback confirmation (1-3 candles)    │
-│   ⚠️ Global invalidation: Counter-crossover resets state   │
-└─────────────────────────────────────────────────────────────┘
-                          ↓ Pullback complete
-┌─────────────────────────────────────────────────────────────┐
-│ WINDOW_OPEN → 2-sided breakout window active (1-20 bars)   │
-│   Success boundary → Execute trade                          │
-│   Failure boundary → Reset to SCANNING                      │
-└─────────────────────────────────────────────────────────────┘
-                          ↓ Breakout detected
-┌─────────────────────────────────────────────────────────────┐
-│ ENTRY → Trade executed with ATR-based SL/TP                │
-└─────────────────────────────────────────────────────────────┘
-```
-
-📚 **Case Studies:** [COMPREHENSIVE_STRATEGY_VERIFICATION.md](docs/archive/COMPREHENSIVE_STRATEGY_VERIFICATION.md)
-
----
-
-## 🔧 Critical Features & Fixes
-
-### ✅ JPY Pairs & 8-Asset Portfolio (v1.2.0 - December 3, 2025)
-
-**NEW FEATURE:** Expanded portfolio to 8 assets with JPY pair support
-
-**New Assets:**
-- 🇯🇵 **EURJPY** - 7% allocation, JPY cross exposure
-- 🇯🇵 **USDJPY** - 8% allocation, JPY carry trade
-
-**Technical Details:**
-- JPY pairs use 3 decimal places (vs 5 for standard forex)
-- Pip value = 0.01 (vs 0.0001 for standard pairs)
-- Scale factor = 100 for proper pip calculations
-- Rebalanced all allocations to maintain 100% total
-
-**Strategy Files:**
-- `sunrise_ogle_eurjpy.py` - EURJPY LONG-only strategy
-- `sunrise_ogle_usdjpy.py` - USDJPY LONG-only strategy
-
-### ✅ UTC Timezone & DST Fix (v2.2.0 - November 16, 2025)
-
-**CRITICAL UPDATE:** Added UTC offset selector to handle Broker Time vs UTC mismatches (Daylight Savings Time)
-
-**New Features:**
-- 🕒 **UTC Offset Selector:** GUI dropdown to select Broker Time (UTC+1 / UTC+2)
-- 🌍 **Internal Conversion:** All strategy time filters now convert broker time to UTC automatically
-- 🔧 **EURUSD Config:** Updated to match backtest settings (Pullback + ATR)
-
-**Why this matters:** Ensures trading hours (e.g., 08:00-16:00 UTC) are respected regardless of broker server time or DST changes.
-
-### ✅ Pullback System Fix (v2.0.1 - November 11, 2025)
-
-**CRITICAL BUG FIXED:** Bot was ignoring `LONG_USE_PULLBACK_ENTRY` configuration flag
-
-**Impact:**
-- EURUSD: Should enter immediately on crossover (flag = False) but was forced into pullback mode ❌
-- XAUUSD: Showing 2 pullback candles when config requires 3 ❌
-
-**Solution:**
-- Added flag check with branching logic (STANDARD vs PULLBACK mode)
-- Created `_execute_entry()` method for immediate entries
-- Enhanced configuration logging at startup
-
-📖 **Full Analysis:** [PULLBACK_SYSTEM_FIX.md](docs/PULLBACK_SYSTEM_FIX.md)
-
-### ✅ Position Sizing Fix (v2.1.0 - November 10, 2025)
-
-**CRITICAL BUG FIXED:** Now uses MT5 broker-specific tick values instead of hardcoded pip values
-
-**Before (BROKEN):**
-```python
-# Hardcoded standard lot assumptions
-GBPUSD: Risk $22.70 instead of $80.13 (3.53x too small) ❌
-XAGUSD: Risk $0.46 instead of $75.12 (163x too small!) ❌
-```
-
-**After (FIXED):**
-```python
-# Dynamic broker-specific calculation
-tick_value = mt5.symbol_info(symbol).trade_tick_value  # Real broker specs
-value_per_point = tick_value × (point / tick_size)
-lot_size = risk_amount / (sl_distance × value_per_point)  ✅
-```
-
-**Enhanced Logging:** Every trade now shows 5 sections:
-1. 📋 Broker specifications (contract size, tick value, digits)
-2. 💰 Dalio allocation (balance, asset %, risk amount)
-3. 🎯 Stop loss (SL distance in points, ATR multiplier)
-4. 🧮 Lot size calculation (step-by-step formula)
-5. ✅ Risk verification (confirms calculated risk matches expected)
-
-📖 **Technical Details:** [POSITION_SIZING_FIX_V2.md](docs/archive/POSITION_SIZING_FIX_V2.md)
-
-### ✅ ATR Filter Implementation (v1.1.0 - October 31, 2025)
-
-**CRITICAL BUG FIXED:** ATR filter was not validating entries due to missing dataframe integration
-
-**Impact:** Reduced entries from ~240/month to ~2-3/month per asset (matches backtesting)
-
-📖 **Details:** [ATR_BUG_FIX_COMPLETE.md](docs/ATR_BUG_FIX_COMPLETE.md)
-
----
-
-## 📁 Project Structure
-
-```
-mt5_live_trading_bot/
-├── advanced_mt5_monitor_gui.py    # Main bot (3,500+ lines)
-├── requirements.txt               # Python dependencies
-├── setup.ps1                      # Automated setup
-├── build_exe.bat                  # Build Windows executable
+mt5_bot_trading_optimize/
+├── advanced_mt5_monitor_gui.py    # Main GUI & Execution Engine
+├── gold_enhancements.py           # Core logic for TP Splitting & Scaling
+├── requirements.txt               # Dependencies
 │
-├── config/                        # Configuration
-│   ├── mt5_credentials_template.json
-│   └── mt5_credentials.json       # (your credentials - gitignored)
-│
-├── strategies/                    # Asset-specific parameters
-│   ├── sunrise_ogle_eurusd.py     # EURUSD strategy (READ-ONLY)
-│   ├── sunrise_ogle_gbpusd.py     # GBPUSD strategy (READ-ONLY)
-│   ├── sunrise_ogle_xauusd.py     # XAUUSD strategy (READ-ONLY)
-│   ├── sunrise_ogle_audusd.py     # AUDUSD strategy (READ-ONLY)
-│   ├── sunrise_ogle_xagusd.py     # XAGUSD strategy (READ-ONLY)
-│   ├── sunrise_ogle_usdchf.py     # USDCHF strategy (READ-ONLY)
-│   ├── sunrise_ogle_eurjpy.py     # EURJPY strategy (READ-ONLY)
-│   └── sunrise_ogle_usdjpy.py     # USDJPY strategy (READ-ONLY)
-│
-├── testing/                       # Test suite
-│   ├── test_setup.py              # Verify installation
-│   ├── test_monitor_components.py # GUI tests
-│   ├── test_mt5_order.py          # Order execution test
-│   ├── check_broker_specs.py      # Broker verification
-│   ├── test_position_sizing.py    # Position sizing tests
-│   ├── test_jpy_entries.py        # JPY pairs validation tests
-│   └── verify_all_symbols.py      # Symbol configuration check
-│
-├── docs/                          # Documentation
-│   ├── README.md                  # Documentation index
-│   ├── START_TESTING_HERE.md      # Quick start guide
-│   └── archive/                   # Historical docs
-│
-└── logs/                          # Application logs (gitignored)
+├── config/                        # Credentials configuration
+├── strategies/                    # Base strategy definitions
+├── testing/                       # Sandbox scripts (Order tests, Broker checks)
+└── docs/                          # All documentation & architectural notes
+    ├── ARCHITECTURE.md            
+    ├── trading_strategy.md        # Strategy Specifications
+    └── archive/                   # Historical bug fixes & logs
 ```
 
 ---
 
-## 📚 Documentation
+## 🧪 Testing (Sandbox)
+Before running the bot on a live account, use the `testing/` folder to verify your broker's compatibility:
 
-### 🎯 Essential Reading (Start Here)
+```powershell
+# Verify Broker Specs (Tick size, digits, minimum lot)
+python testing/check_broker_specs.py
 
-1. **[DALIO_QUICK_REFERENCE.md](docs/DALIO_QUICK_REFERENCE.md)** - Position sizing quick reference
-2. **[FILTER_CONFIGURATION.md](docs/archive/FILTER_CONFIGURATION.md)** - Entry filter matrix
-3. **[START_TESTING_HERE.md](docs/START_TESTING_HERE.md)** - Testing guide
+# Test Mathematical Sizing (Ensures 1% risk calculation is perfect)
+python testing/test_position_sizing.py
 
-### 📖 Core Documentation
-
-4. **[DALIO_ALLOCATION_SYSTEM.md](docs/DALIO_ALLOCATION_SYSTEM.md)** - Complete Ray Dalio implementation
-5. **[COMPREHENSIVE_STRATEGY_VERIFICATION.md](docs/archive/COMPREHENSIVE_STRATEGY_VERIFICATION.md)** - 1,500+ line verification (MT5 vs Backtrader)
-6. **[STRATEGY_FILES_POLICY.md](docs/STRATEGY_FILES_POLICY.md)** - READ-ONLY policy for strategy files
-7. **[strategy_comparison.md](docs/strategy_comparison.md)** - **Source of Truth** for strategy parameters and logic
-
-### 🔧 Technical Documentation
-
-7. **[POSITION_SIZING_FIX_V2.md](docs/archive/POSITION_SIZING_FIX_V2.md)** - Position sizing fix (MT5 tick value integration)
-8. **[PULLBACK_SYSTEM_FIX.md](docs/PULLBACK_SYSTEM_FIX.md)** - Pullback flag check implementation
-9. **[DEEP_STRATEGY_ANALYSIS_NOV14.md](docs/DEEP_STRATEGY_ANALYSIS_NOV14.md)** - 25-page session analysis
-10. **[docs/](docs/)** - Additional guides (EMA setup, pullback fixes, etc.)
-
----
-
-## 🧪 Testing
-
-### Quick Verification
-
-```bash
-# 1. Installation check
-cd testing
-python test_setup.py
-
-# 2. Broker specifications
-python check_broker_specs.py
-
-# 3. Position sizing validation
-python test_position_sizing.py
-
-# 4. Symbol configuration check
-python verify_all_symbols.py
-```
-
-### Order Execution Test (⚠️ Places Real Orders)
-
-```bash
-cd testing
-python test_mt5_order.py  # Basic order test
-```
-
-**Always use demo accounts for testing!**
-
----
-
-## ⚙️ Configuration
-
-### MT5 Credentials (`config/mt5_credentials.json`)
-
-```json
-{
-  "account": 12345678,
-  "password": "YourPassword",
-  "server": "YourBroker-Demo"
-}
-```
-
-### Strategy Parameters
-
-Each strategy file in `strategies/` contains:
-- EMA periods (Fast, Medium, Slow, Filter)
-- ATR multipliers (SL: 4.5x, TP: 6.5x default)
-- Pullback requirements (1-3 candles)
-- Window duration (1-20 bars)
-- Trading hours (UTC)
-- Filter thresholds (ATR, Angle, etc.)
-
-**⚠️ IMPORTANT:** Strategy files are **READ-ONLY** to preserve backtesting integrity. See [STRATEGY_FILES_POLICY.md](docs/STRATEGY_FILES_POLICY.md)
-
----
-
-## 🛡️ Risk Management
-
-### Safety Features
-
-- ✅ **Ray Dalio Allocation** - Maximum 1% portfolio risk across all assets
-- ✅ **6-Layer Filters** - Validates every signal before entry
-- ✅ **ATR-Based SL/TP** - Dynamic stop loss (4.5x ATR) and take profit (6.5x ATR)
-- ✅ **MT5 Broker Integration** - Uses actual tick values (not hardcoded)
-- ✅ **Global Invalidation** - Counter-trend crossovers reset armed states
-- ✅ **Duplicate Prevention** - Checks existing positions before entry
-- ✅ **Time Filters** - Trading hour restrictions per asset
-
-### Warnings
-
-⚠️ **Never risk more than you can afford to lose**  
-⚠️ **Understand the system completely before live trading**  
-⚠️ **Start with minimum position sizes on demo accounts**  
-⚠️ **Keep detailed logs of all trading activity**  
-⚠️ **Strategy files are READ-ONLY** - Preserve backtesting integrity
-
----
-
-## 🎨 GUI Features
-
-### Real-Time Monitoring
-
-- **Asset Dashboard** - Price, state, pullback count, window status
-- **Live Charts** - Candlesticks with EMA overlays (Fast, Medium, Slow, Filter)
-- **Strategy States** - Color-coded phase indicators (SCANNING, ARMED, WINDOW_OPEN)
-- **Configuration Viewer** - Complete strategy parameters and filter details
-- **Terminal Logging** - Real-time event log with timestamps
-
-### Chart Controls
-
-- **Symbol Selection** - Switch between 8 monitored assets
-- **Timeframe** - M5 (5-minute candles)
-- **Indicators** - EMA overlays, volume bars
-- **Window Markers** - Shows breakout boundaries when window active
-
----
-
-## 🔍 Troubleshooting
-
-### MT5 Connection Failed
-
-```
-✓ Ensure MT5 terminal is running and logged in
-✓ Verify credentials in config/mt5_credentials.json
-✓ Check MetaTrader5 Python package installed
-✓ Restart MT5 terminal
-```
-
-### No Signals Detected
-
-```
-✓ Confirm market is open for selected assets
-✓ Check if price data streaming (see logs/)
-✓ Review filter thresholds (may be too strict)
-✓ Verify strategy files loaded (check terminal)
-```
-
-### Position Sizing Issues
-
-```
-✓ Run testing/check_broker_specs.py
-✓ Verify MT5 account balance fetched correctly
-✓ Check logs for broker specifications section
-✓ Confirm tick_value matches broker's contract specs
+# Test Order Execution (Places a 0.01 micro-lot to verify API rights)
+python testing/test_mt5_order.py
 ```
 
 ---
 
-## 🤝 Contributing
-
-Contributions welcome! Please:
-
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/AmazingFeature`)
-3. **Read [STRATEGY_FILES_POLICY.md](docs/STRATEGY_FILES_POLICY.md)** - Strategy files are READ-ONLY
-4. Test on demo account thoroughly
-5. Document changes and include test results
-6. Submit Pull Request
-
----
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
----
-
-## ⚖️ Disclaimer
-
+## 🛡️ Risk Disclaimer
 **This software is for educational purposes only.**
-
-Trading financial instruments carries high risk and may not be suitable for all investors. No representation is made that any account will achieve profits or losses similar to those shown. Past performance is not indicative of future results.
-
-**The developers assume no responsibility for your trading results. Use at your own risk.**
-
----
-
-## 🙏 Acknowledgments
-
-- MetaTrader 5 Python API
-- Ray Dalio's All-Weather Portfolio principles
-- mplfinance for financial charts
-- Backtrader for strategy development
-
----
-
-**⚡ Happy Trading! Trade with institutional-grade risk management!**
+Trading Gold (XAUUSD) on leverage carries exceptionally high risk. The Scaling Engine is an aggressive tactic that increases margin utilization. 
+* **ALWAYS test on a DEMO account first.**
+* The developers assume no responsibility for your trading results. Use at your own risk.
