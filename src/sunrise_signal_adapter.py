@@ -10,11 +10,13 @@ Current Phase: Strategy Signal Processing
 Next Phase: Order Management and Risk Control
 """
 
-import pandas as pd
-import numpy as np
+import pandas as pd  # type: ignore
+import numpy as np  # type: ignore
 from datetime import datetime, timedelta
-import MetaTrader5 as mt5
-from typing import Dict, Optional, Tuple, List
+import MetaTrader5 as mt5_module  # type: ignore
+from typing import Dict, Optional, Tuple, List, Any
+
+mt5: Any = mt5_module
 import logging
 from pathlib import Path
 import sys
@@ -37,14 +39,16 @@ if not LOCAL_STRATEGIES_DIR.exists():
     print("Please ensure strategies are copied to the local strategies folder")
 
 # Import strategies with individual error handling using dynamic imports
-strategy_classes = {}
+strategy_classes: Dict[str, Any] = {}
 strategies_to_import = [
     ('sunrise_ogle_eurusd', 'SunriseOgle', 'EURUSD'),
     ('sunrise_ogle_gbpusd', 'SunriseOgle', 'GBPUSD'),
     ('sunrise_ogle_xauusd', 'SunriseOgle', 'XAUUSD'),
     ('sunrise_ogle_audusd', 'SunriseOgle', 'AUDUSD'),
     ('sunrise_ogle_xagusd', 'SunriseOgle', 'XAGUSD'),
-    ('sunrise_ogle_usdchf', 'SunriseOgle', 'USDCHF')
+    ('sunrise_ogle_usdchf', 'SunriseOgle', 'USDCHF'),
+    ('sunrise_ogle_eurjpy', 'SunriseOgle', 'EURJPY'),
+    ('sunrise_ogle_usdjpy', 'SunriseOgleUSDJPY', 'USDJPY'),
 ]
 
 for module_name, class_name, symbol in strategies_to_import:
@@ -75,12 +79,12 @@ class TradingSignal:
                  symbol: str,
                  signal_type: str,
                  confidence: float,
-                 entry_price: float = None,
-                 stop_loss: float = None,
-                 take_profit: float = None,
-                 position_size: float = None,
-                 timestamp: datetime = None,
-                 metadata: Dict = None):
+                 entry_price: Optional[float] = None,
+                 stop_loss: Optional[float] = None,
+                 take_profit: Optional[float] = None,
+                 position_size: Optional[float] = None,
+                 timestamp: Optional[datetime] = None,
+                 metadata: Optional[Dict] = None):
         
         self.symbol = symbol
         self.signal_type = signal_type
@@ -93,7 +97,7 @@ class TradingSignal:
         self.metadata = metadata or {}
     
     def to_dict(self) -> Dict:
-        """Convert signal to dictionary"""
+        """Convert signal to dictionary (JSON-serializable)"""
         return {
             'symbol': self.symbol,
             'signal_type': self.signal_type,
@@ -102,22 +106,23 @@ class TradingSignal:
             'stop_loss': self.stop_loss,
             'take_profit': self.take_profit,
             'position_size': self.position_size,
-            'timestamp': self.timestamp,
+            'timestamp': self.timestamp.isoformat() if isinstance(self.timestamp, datetime) else str(self.timestamp),
             'metadata': self.metadata
         }
     
     def __str__(self):
-        return f"Signal({self.symbol}, {self.signal_type}, conf={self.confidence:.2f})"
+        conf = self.confidence if self.confidence is not None else 0.0
+        return f"Signal({self.symbol}, {self.signal_type}, conf={conf:.2f})"
 
 class SunriseSignalGenerator:
     """Generates trading signals from Sunrise strategy logic"""
     
-    def __init__(self, symbol: str, strategy_class, logger=None):
+    def __init__(self, symbol: str, strategy_class: Any, logger: Any = None):
         self.symbol = symbol
         self.strategy_class = strategy_class
         self.logger = logger or logging.getLogger(__name__)
         self.last_signal = None
-        self.data_buffer = []
+        self.data_buffer = pd.DataFrame()  # Empty DataFrame, filled by update_data()
         self.buffer_size = 100  # Keep last 100 bars for analysis
         
     def update_data(self, rates: np.ndarray):
@@ -152,12 +157,13 @@ class SunriseSignalGenerator:
             indicators['ema_50'] = df['close'].ewm(span=50).mean()
             indicators['ema_100'] = df['close'].ewm(span=100).mean()
             
-            # Calculate RSI
+            # Calculate RSI (with division-by-zero protection)
             delta = df['close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            indicators['rsi'] = 100 - (100 / (1 + rs))
+            # Avoid division by zero: when loss is 0, RSI = 100 (fully overbought)
+            rs = gain / pd.Series(loss).replace(0, np.nan)  # type: ignore
+            indicators['rsi'] = pd.Series(100 - (100 / (1 + rs))).fillna(100.0)  # type: ignore
             
             # Calculate MACD
             ema_12 = df['close'].ewm(span=12).mean()
@@ -211,7 +217,7 @@ class SunriseSignalGenerator:
             signal = self._apply_sunrise_logic(current_price, latest_indicators, current_data)
             
             if signal:
-                signal.timestamp = current_time
+                signal.timestamp = pd.to_datetime(current_time)  # type: ignore
                 self.last_signal = signal
                 self.logger.info(f"Generated signal for {self.symbol}: {signal}")
             
@@ -221,7 +227,7 @@ class SunriseSignalGenerator:
             self.logger.error(f"Error generating signal for {self.symbol}: {e}")
             return None
     
-    def _apply_sunrise_logic(self, price: float, indicators: Dict, market_data: Dict) -> Optional[TradingSignal]:
+    def _apply_sunrise_logic(self, price: float, indicators: Dict, market_data) -> Optional[TradingSignal]:
         """Apply Sunrise strategy trading logic"""
         try:
             # Basic Sunrise strategy conditions (simplified version)
@@ -234,8 +240,15 @@ class SunriseSignalGenerator:
             macd = indicators.get('macd')
             macd_signal = indicators.get('macd_signal')
             
-            if None in [ema_21, ema_50, rsi, macd, macd_signal]:
+            if any(pd.isna(x) or x is None for x in [ema_21, ema_50, rsi, macd, macd_signal]):
                 return None
+                
+            # Type casting for static analyzers
+            ema_21 = float(ema_21) # type: ignore
+            ema_50 = float(ema_50) # type: ignore
+            rsi = float(rsi) # type: ignore
+            macd = float(macd) # type: ignore
+            macd_signal = float(macd_signal) # type: ignore
             
             # Initialize signal parameters
             signal_type = SignalType.HOLD
@@ -296,7 +309,7 @@ class SunriseSignalGenerator:
 class MultiSymbolSignalManager:
     """Manages signal generation for multiple symbols"""
     
-    def __init__(self, logger=None):
+    def __init__(self, logger: Any = None):
         self.logger = logger or logging.getLogger(__name__)
         self.signal_generators = {}
         # Use the dynamically imported strategy classes
@@ -355,15 +368,15 @@ class MultiSymbolSignalManager:
 class MT5DataProvider:
     """Provides real-time data from MT5 for signal generation"""
     
-    def __init__(self, logger=None):
+    def __init__(self, logger: Any = None):
         self.logger = logger or logging.getLogger(__name__)
         self.connected = False
     
     def connect(self) -> bool:
         """Connect to MT5 for data access"""
         try:
-            if not mt5.initialize():
-                self.logger.error(f"MT5 initialization failed: {mt5.last_error()}")
+            if not mt5.initialize(): # type: ignore
+                self.logger.error(f"MT5 initialization failed: {mt5.last_error()}") # type: ignore
                 return False
             
             self.connected = True
@@ -380,7 +393,7 @@ class MT5DataProvider:
             if not self.connected:
                 return None
             
-            rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
+            rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count) # type: ignore
             if rates is None:
                 self.logger.warning(f"No rates available for {symbol}")
                 return None
@@ -397,13 +410,12 @@ class MT5DataProvider:
             if not self.connected:
                 return None
             
-            tick = mt5.symbol_info_tick(symbol)
+            tick = mt5.symbol_info_tick(symbol) # type: ignore
             if tick is None:
                 return None
             
             return {
                 'time': tick.time,
-                'bid': tick.bid,
                 'ask': tick.ask,
                 'spread': tick.ask - tick.bid
             }
@@ -415,7 +427,7 @@ class MT5DataProvider:
     def disconnect(self):
         """Disconnect from MT5"""
         if self.connected:
-            mt5.shutdown()
+            mt5.shutdown() # type: ignore
             self.connected = False
             self.logger.info("Disconnected from MT5")
 

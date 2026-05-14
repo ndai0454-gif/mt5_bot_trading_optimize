@@ -5,8 +5,8 @@ This helps VS Code resolve imports and reduces warnings
 
 from typing import Optional, Dict, List, Any
 from datetime import datetime
-import pandas as pd
-import numpy as np
+import pandas as pd  # type: ignore
+import numpy as np  # type: ignore
 
 class SignalType:
     BUY: str

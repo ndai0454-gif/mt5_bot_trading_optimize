@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+from src.oracle3_wang import OracleWangTransform
+
 logger = logging.getLogger(__name__)
 
 # =============================================================
@@ -77,6 +79,7 @@ class KellyStats:
     avg_win: float = 0.0           # Average winning trade ($)
     avg_loss: float = 0.0          # Average losing trade ($, positive)
     rr_ratio: float = 0.0          # R:R = avg_win / avg_loss
+    wang_p_star: float = 0.0       # True Probability adjusted by Oracle3 Wang Transform
     raw_kelly: float = 0.0         # Full Kelly percentage
     fractional_kelly: float = 0.0  # After applying fraction
     final_risk_pct: float = 0.01   # After applying min/max caps
@@ -165,6 +168,9 @@ class KellySizer:
         # Per-symbol trade history for differentiated sizing
         self._symbol_trades: dict[str, deque[TradeRecord]] = {}
 
+        # Oracle3 Wang Transform Engine
+        self.wang_transform = OracleWangTransform()
+
         # Load persisted history
         if enable_persistence:
             self._load_history()
@@ -226,24 +232,38 @@ class KellySizer:
 
         return record
 
-    def get_risk_percent(self, symbol: Optional[str] = None) -> float:
+    def get_risk_percent(
+        self, 
+        symbol: Optional[str] = None, 
+        volume_norm: float = 0.0, 
+        spread_norm: float = 0.0
+    ) -> float:
         """Get the optimal risk percentage for the next trade.
 
         Args:
             symbol: If provided, uses per-symbol statistics.
                     If None, uses global (all symbols) statistics.
+            volume_norm: Normalized tick volume for Wang Transform.
+            spread_norm: Normalized spread for Wang Transform.
 
         Returns:
             Risk percentage as a decimal (e.g., 0.015 = 1.5%).
         """
-        stats = self.compute_stats(symbol)
+        stats = self.compute_stats(symbol, volume_norm, spread_norm)
         return stats.final_risk_pct
 
-    def compute_stats(self, symbol: Optional[str] = None) -> KellyStats:
+    def compute_stats(
+        self, 
+        symbol: Optional[str] = None, 
+        volume_norm: float = 0.0, 
+        spread_norm: float = 0.0
+    ) -> KellyStats:
         """Compute full Kelly statistics.
 
         Args:
             symbol: If provided, compute for specific symbol only.
+            volume_norm: Normalized tick volume for Wang Transform.
+            spread_norm: Normalized spread for Wang Transform.
 
         Returns:
             KellyStats with all computed values.
@@ -279,9 +299,20 @@ class KellySizer:
         # Risk-Reward ratio
         stats.rr_ratio = stats.avg_win / stats.avg_loss if stats.avg_loss > 0 else 0.0
 
-        # Kelly formula: K = W - (1-W)/R
+        # Apply Oracle3 Wang Transform to adjust the empirical win rate
+        # using the current market volume and spread conditions.
+        if stats.win_rate > 0:
+            stats.wang_p_star = self.wang_transform.get_true_probability(
+                p_mkt=stats.win_rate,
+                volume_norm=volume_norm,
+                spread_norm=spread_norm
+            )
+        else:
+            stats.wang_p_star = 0.0
+
+        # Kelly formula: K = W - (1-W)/R (Using True Probability from Wang Transform)
         if stats.rr_ratio > 0:
-            stats.raw_kelly = stats.win_rate - (1.0 - stats.win_rate) / stats.rr_ratio
+            stats.raw_kelly = stats.wang_p_star - (1.0 - stats.wang_p_star) / stats.rr_ratio
         else:
             stats.raw_kelly = 0.0
 
@@ -312,12 +343,17 @@ class KellySizer:
 
         return stats
 
-    def get_summary(self, symbol: Optional[str] = None) -> str:
+    def get_summary(
+        self, 
+        symbol: Optional[str] = None,
+        volume_norm: float = 0.0,
+        spread_norm: float = 0.0
+    ) -> str:
         """Get a human-readable summary of Kelly statistics.
 
         Useful for GUI terminal display.
         """
-        stats = self.compute_stats(symbol)
+        stats = self.compute_stats(symbol, volume_norm, spread_norm)
         label = f'[{symbol}]' if symbol else '[ALL]'
 
         if stats.using_fallback:
@@ -330,7 +366,7 @@ class KellySizer:
         edge_status = 'POSITIVE' if stats.has_edge else 'NEGATIVE'
         return (
             f'Kelly {label}: {edge_status} EDGE | '
-            f'WinRate: {stats.win_rate*100:.1f}% | '
+            f'WinRate: {stats.win_rate*100:.1f}% -> p*: {stats.wang_p_star*100:.1f}% | '
             f'R:R: {stats.rr_ratio:.2f} | '
             f'Raw Kelly: {stats.raw_kelly*100:.1f}% | '
             f'{self.fraction:.0%} Kelly: {stats.fractional_kelly*100:.2f}% | '
@@ -451,6 +487,8 @@ def calculate_kelly_risk_amount(
     allocation_percent: float,
     symbol: str,
     default_risk_percent: float = 0.01,
+    volume_norm: float = 0.0,
+    spread_norm: float = 0.0
 ) -> tuple[float, float, str]:
     """Calculate risk amount using Kelly Criterion.
 
@@ -462,6 +500,8 @@ def calculate_kelly_risk_amount(
         allocation_percent: Dalio allocation for this symbol (0.0 → 1.0)
         symbol: Trading symbol
         default_risk_percent: Fallback risk if Kelly not available
+        volume_norm: Current tick volume normalized
+        spread_norm: Current spread normalized
 
     Returns:
         (risk_amount, risk_percent, summary_text)
@@ -469,10 +509,18 @@ def calculate_kelly_risk_amount(
     allocated_capital = balance * allocation_percent
 
     # Get Kelly-optimal risk percentage
-    risk_percent = kelly_sizer.get_risk_percent(symbol=symbol)
+    risk_percent = kelly_sizer.get_risk_percent(
+        symbol=symbol, 
+        volume_norm=volume_norm, 
+        spread_norm=spread_norm
+    )
     risk_amount = allocated_capital * risk_percent
 
     # Generate summary for terminal logging
-    summary = kelly_sizer.get_summary(symbol=symbol)
+    summary = kelly_sizer.get_summary(
+        symbol=symbol,
+        volume_norm=volume_norm,
+        spread_norm=spread_norm
+    )
 
     return risk_amount, risk_percent, summary

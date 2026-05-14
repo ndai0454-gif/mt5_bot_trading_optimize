@@ -243,6 +243,8 @@ class AdvancedMT5TradingMonitorGUI:
         self.signals_history = []
         self.connection_history = []
         self.signal_manager = None
+        self.daily_trades_count = 0
+        self.last_trade_day = None
         
         # Smart logging controls
         self.last_hourly_summary = datetime.now()
@@ -609,9 +611,19 @@ class AdvancedMT5TradingMonitorGUI:
         if not MATPLOTLIB_AVAILABLE or Figure is None or FigureCanvasTkAgg is None:
             return
             
-        # Create figure and axis
-        self.fig = Figure(figsize=(12, 8), dpi=100)
-        self.ax = self.fig.add_subplot(111)
+        import matplotlib.gridspec as gridspec
+        # Create figure
+        self.fig = Figure(figsize=(12, 10), dpi=100)
+        
+        # Create gridspec for 3 subplots (Price, RSI, ATR)
+        gs = gridspec.GridSpec(3, 1, height_ratios=[3, 1, 1], hspace=0.1)
+        
+        # Main price axis
+        self.ax = self.fig.add_subplot(gs[0])
+        # RSI axis
+        self.ax_rsi = self.fig.add_subplot(gs[1], sharex=self.ax)
+        # ATR axis
+        self.ax_atr = self.fig.add_subplot(gs[2], sharex=self.ax)
         
         # Create canvas
         self.canvas = FigureCanvasTkAgg(self.fig, parent)
@@ -630,7 +642,10 @@ class AdvancedMT5TradingMonitorGUI:
         self.ax.set_title("Live Chart - Select Symbol")
         self.ax.set_xlabel("Time")
         self.ax.set_ylabel("Price")
-        self.fig.tight_layout()
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            self.fig.tight_layout()
     
     def create_status_bar(self):
         """Create the status bar at the bottom"""
@@ -1063,6 +1078,56 @@ class AdvancedMT5TradingMonitorGUI:
             self.terminal_log(f"[X] Connection error: {str(e)}", "ERROR")
             return False
             
+    def _chart_monitoring_loop(self):
+        """Dedicated high-frequency loop for Zero-Delay UI chart rendering"""
+        last_log_time = 0
+        while self.monitoring_active and not self.stop_event.is_set():
+            try:
+                # ==========================================
+                # REALTIME CHART UPDATER
+                # Fetch live latest unclosed candle for visual display
+                # ==========================================
+                if MATPLOTLIB_AVAILABLE and self.chart_symbol_var.get() and mt5 and self.mt5_connected:
+                    active_symbol = self.chart_symbol_var.get()
+                    try:
+                        # Fetch latest bars including the current live (unclosed) bar
+                        live_rates = mt5.copy_rates_from_pos(active_symbol, mt5.TIMEFRAME_H1, 0, CHART_DISPLAY_BARS + 1) # type: ignore
+                        if live_rates is not None and len(live_rates) > 0:
+                            live_df = pd.DataFrame(live_rates) # type: ignore
+                            # Preserve existing indicators
+                            live_indicators = self.chart_data.get(active_symbol, {}).get('indicators', {})
+                            
+                            current_price = float(live_df['close'].iloc[-1])
+                            live_indicators['current_price'] = current_price
+                            
+                            self.chart_data[active_symbol] = {
+                                'df': live_df.tail(CHART_DISPLAY_BARS),
+                                'indicators': live_indicators,
+                                'timestamp': datetime.now()
+                            }
+                            # Thread-safe GUI update
+                            self.root.after(0, self.refresh_chart)
+                            
+                            # REAL-TIME MARKET EVALUATION LOGGING (Every 5 seconds)
+                            current_time = time.time()
+                            if current_time - last_log_time >= 5.0:
+                                if len(live_df) >= 18:
+                                    ema14 = live_df['close'].ewm(span=14, adjust=False).mean().iloc[-1]
+                                    ema18 = live_df['close'].ewm(span=18, adjust=False).mean().iloc[-1]
+                                    trend = "BULLISH" if ema14 > ema18 else "BEARISH" if ema14 < ema18 else "NEUTRAL"
+                                    diff = abs(ema14 - ema18)
+                                    
+                                    self.terminal_log(f" [REAL-TIME] {active_symbol} | Price: {current_price:.2f} | Trend: {trend} (EMA Diff: {diff:.2f})", "NORMAL")
+                                last_log_time = current_time
+
+                    except Exception:
+                        pass
+                
+                # Update chart every 1 second (Zero-Delay for human perception)
+                time.sleep(1.0)
+            except Exception:
+                time.sleep(1.0)
+
     def initialize_signal_processing(self):
         """Initialize signal processing components"""
         try:
@@ -1341,12 +1406,17 @@ class AdvancedMT5TradingMonitorGUI:
         self.monitor_thread = threading.Thread(target=self.advanced_monitoring_loop, daemon=True)
         self.monitor_thread.start()
         
+        # Start dedicated real-time chart thread (Zero-Delay updates)
+        if MATPLOTLIB_AVAILABLE:
+            self.chart_thread = threading.Thread(target=self._chart_monitoring_loop, daemon=True)
+            self.chart_thread.start()
+        
         # Startup Summary
         self.terminal_log("=" * 70, "SUCCESS", critical=True)
         self.terminal_log(f" MT5 TRADING BOT v{APP_VERSION} - SUNRISE OGLE STRATEGY ACTIVATED", "SUCCESS", critical=True)
         self.terminal_log("=" * 70, "SUCCESS", critical=True)
         self.terminal_log(f" Monitored Pairs: {', '.join(self.strategy_states.keys())}", "INFO", critical=True)
-        self.terminal_log(f" Timeframe: 5-Minute (M5)", "INFO", critical=True)
+        self.terminal_log(f" Timeframe: 1-Hour (H1)", "INFO", critical=True)
         self.terminal_log(f" Strategy: 4-Phase State Machine (SCANNING -> ARMED -> PULLBACK -> WINDOW -> ENTRY)", "INFO", critical=True)
         self.terminal_log("", "INFO", critical=True)
         self.terminal_log(" Tracking:", "INFO", critical=True)
@@ -1402,8 +1472,38 @@ class AdvancedMT5TradingMonitorGUI:
         
         while self.monitoring_active and not self.stop_event.is_set():
             try:
-                current_minute = datetime.now().minute
-                current_second = datetime.now().second
+                current_time = datetime.now()
+                current_minute = current_time.minute
+                current_second = current_time.second
+                
+                # ==============================================================
+                # 1. 24/5 OPERATION (WEEKEND SKIP) - GMT+7 Vietnam Time
+                # Market closes ~05:00 AM Saturday (VN), opens ~04:00 AM Monday (VN)
+                # ==============================================================
+                is_weekend = False
+                if (current_time.weekday() == 5 and current_time.hour >= 6) or \
+                   (current_time.weekday() == 6) or \
+                   (current_time.weekday() == 0 and current_time.hour < 4):
+                    is_weekend = True
+                    self.status_label.config(text="Status: Market Closed (Weekend)")
+                    time.sleep(60) # Check again next minute
+                    continue
+                else:
+                    self.status_label.config(text="Advanced Monitoring Active")
+
+                # ==============================================================
+                # 2. DAILY RECAP & DATA COLLECTION (Every day at 23:59 VN Time)
+                # ==============================================================
+                if current_time.hour == 23 and current_time.minute == 59 and current_second <= 5:
+                    if getattr(self, '_last_daily_recap_day', None) != current_time.day:
+                        self.terminal_log("="*70, "SUCCESS", critical=True)
+                        self.terminal_log(" DAILY RECAP: COLLECTING & UPDATING MARKET DATA...", "SUCCESS", critical=True)
+                        self.log_phase_summary()
+                        # Run Kelly edge recalibration and persistence updates
+                        self.save_strategy_state()
+                        self.terminal_log(f" MARKET DATA UPDATED FOR NEXT TRADING DAY ({current_time.date()})", "SUCCESS", critical=True)
+                        self.terminal_log("="*70, "SUCCESS", critical=True)
+                        self._last_daily_recap_day = current_time.day
                 
                 # SMART CANDLE DETECTION: Only check at candle close
                 # M5 candles close when minute % 5 == 0 (0, 5, 10, 15, 20, etc.)
@@ -1551,7 +1651,7 @@ class AdvancedMT5TradingMonitorGUI:
                         
                         # Now do a standard data fetch to get df for determine_strategy_phase
                         # The state machine needs candle data for filter validation
-                        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 101)
+                        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 101)
                         if rates is not None and len(rates) >= 2:
                             df = pd.DataFrame(rates)
                             df['time'] = pd.to_datetime(df['time'], unit='s')
@@ -1597,7 +1697,7 @@ class AdvancedMT5TradingMonitorGUI:
                     else:
                         # No result yet - fast-poll is still running in background
                         # Still do standard candle check for bar counter + chart update
-                        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 101)
+                        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 101)
                         if rates is not None and len(rates) >= 2:
                             df = pd.DataFrame(rates)
                             df['time'] = pd.to_datetime(df['time'], unit='s')
@@ -1647,7 +1747,7 @@ class AdvancedMT5TradingMonitorGUI:
                 
                 # Fast path: Fetch more bars for proper chart display (100 bars for charting)
                 # We need enough data to show the chart properly, not just 2-3 bars
-                rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 101)  # type: ignore
+                rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 101)  # type: ignore
                 
                 # RECONNECT LOGIC: Handle IPC failures
                 if rates is None:
@@ -1656,7 +1756,7 @@ class AdvancedMT5TradingMonitorGUI:
                         self.terminal_log(f" {symbol}: IPC Error detected - Attempting reconnect...", "WARNING", critical=True)
                         if self.attempt_reconnect():
                             # Retry fetch once
-                            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 101)
+                            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 101)
                 
                 if rates is None or len(rates) < 2:
                     self.terminal_log(f"[X] {symbol}: Fast path failed - no data from MT5", "ERROR", critical=True)
@@ -1728,7 +1828,7 @@ class AdvancedMT5TradingMonitorGUI:
             # OPTIMIZED: Reduced from 501 to 151 bars
             # Longest EMA is Filter EMA (100) - we fetch 1.5x for stability (150 + 1 forming)
             # This reduces data processing by 70% while maintaining accuracy
-            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, BARS_TO_FETCH)  # type: ignore
+            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, BARS_TO_FETCH)  # type: ignore
             
             # RECONNECT LOGIC: Handle IPC failures
             if rates is None:
@@ -1737,7 +1837,7 @@ class AdvancedMT5TradingMonitorGUI:
                     self.terminal_log(f" {symbol}: IPC Error detected - Attempting reconnect...", "WARNING", critical=True)
                     if self.attempt_reconnect():
                         # Retry fetch once
-                        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, BARS_TO_FETCH)
+                        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, BARS_TO_FETCH)
             
             if rates is None:
                 error = mt5.last_error()  # type: ignore
@@ -4100,6 +4200,8 @@ class AdvancedMT5TradingMonitorGUI:
             
             # Clear previous plot
             self.ax.clear()
+            self.ax_rsi.clear()
+            self.ax_atr.clear()
             
             # Visualization Layer: Convert Broker Time to UTC
             df_local = df.copy()
@@ -4262,25 +4364,79 @@ class AdvancedMT5TradingMonitorGUI:
             
             # Formatting
             self.ax.set_title(f'{symbol} - Live Candlestick Chart with ATR SL/TP (Phase: {state["phase"]})')
-            self.ax.set_xlabel('Time (UTC)')
             self.ax.set_ylabel('Price')
             self.ax.legend(loc='upper left', fontsize=7, ncol=2)
             self.ax.grid(True, alpha=0.3)
             
-            # Format time axis
-            if mdates is not None:
-                self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))  # type: ignore
-            self.ax.tick_params(axis='x', rotation=45, labelsize=8)
-            
-            # Set reasonable y-axis limits
+            # Set reasonable y-axis limits for main chart
             price_range = df_local['high'].max() - df_local['low'].min()
-            y_margin = price_range * 0.02  # 2% margin
+            y_margin = price_range * 0.05
+            
+            # Draw Real-time Current Price Line (Like MT5 Bid Line)
+            if 'current_price' in indicators:
+                cp = indicators['current_price']
+                self.ax.axhline(y=cp, color='darkgray', linestyle='-', linewidth=1.5, alpha=0.9, zorder=5)
+                self.ax.text(df_local['time'].iloc[-1], cp, f'  {cp:.2f}', color='white', 
+                           bbox=dict(facecolor='gray', edgecolor='none', alpha=0.8, pad=0.3),
+                           verticalalignment='center', fontsize=8, fontweight='bold', zorder=6)
+            
             self.ax.set_ylim(df_local['low'].min() - y_margin, df_local['high'].max() + y_margin)
             
-            self.fig.tight_layout()
-            self.canvas.draw()
+            # -----------------------------------------------------
+            # Plot RSI Subplot
+            # -----------------------------------------------------
+            rsi_period = self.extract_numeric_value(config.get('rsi_length', config.get('RSI Period', '14')))
+            if len(df_local) > rsi_period:
+                delta = df_local['close'].diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=int(rsi_period)).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=int(rsi_period)).mean()
+                rs = gain / loss
+                rsi_series = 100 - (100 / (1 + rs))
+                
+                self.ax_rsi.plot(df_local['time'], rsi_series, color='purple', linewidth=1.5, label='RSI')
+                self.ax_rsi.axhline(70, color='red', linestyle='--', alpha=0.5)
+                self.ax_rsi.axhline(30, color='green', linestyle='--', alpha=0.5)
+                self.ax_rsi.fill_between(df_local['time'], rsi_series, 70, where=(rsi_series >= 70), facecolor='red', alpha=0.3)
+                self.ax_rsi.fill_between(df_local['time'], rsi_series, 30, where=(rsi_series <= 30), facecolor='green', alpha=0.3)
+                self.ax_rsi.set_ylabel(f'RSI ({int(rsi_period)})', fontsize=8)
+                self.ax_rsi.grid(True, alpha=0.3)
+                self.ax_rsi.set_ylim(0, 100)
             
-            self.terminal_log(f" Candlestick chart refreshed for {symbol} (Phase: {state['phase']})", "NORMAL")
+            # -----------------------------------------------------
+            # Plot ATR Subplot
+            # -----------------------------------------------------
+            atr_period = self.extract_numeric_value(config.get('atr_length', config.get('ATR Period', '10')))
+            if len(df_local) > atr_period:
+                high_low = df_local['high'] - df_local['low']
+                high_close = (df_local['high'] - df_local['close'].shift()).abs()
+                low_close = (df_local['low'] - df_local['close'].shift()).abs()
+                tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+                atr_series = tr.rolling(window=int(atr_period)).mean()
+                
+                self.ax_atr.plot(df_local['time'], atr_series, color='orange', linewidth=1.5, label='ATR')
+                self.ax_atr.set_ylabel(f'ATR ({int(atr_period)})', fontsize=8)
+                self.ax_atr.grid(True, alpha=0.3)
+            
+            # Hide X labels for main and RSI to avoid clutter, only show on bottom ATR
+            import matplotlib.pyplot as plt
+            plt.setp(self.ax.get_xticklabels(), visible=False)
+            plt.setp(self.ax_rsi.get_xticklabels(), visible=False)
+            
+            # Format time axis on bottom ATR
+            if mdates is not None:
+                self.ax_atr.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))  # type: ignore
+            self.ax_atr.tick_params(axis='x', rotation=45, labelsize=8)
+            self.ax_atr.set_xlabel('Time (UTC)')
+            
+            # Remove old x-axis formatting from main ax
+            self.ax.set_xlabel('')
+            
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self.fig.tight_layout()
+            self.canvas.draw()
+            # Log removed to prevent spam
             
         except Exception as e:
             self.terminal_log(f"[X] Chart refresh error: {str(e)}", "ERROR")
@@ -4629,6 +4785,16 @@ class AdvancedMT5TradingMonitorGUI:
             self.terminal_log(f"[X] {symbol}: Cannot execute trade - MT5 not connected", "ERROR", critical=True)
             return False
             
+        # Daily trade limit check
+        current_date = datetime.now().date()
+        if self.last_trade_day != current_date:
+            self.daily_trades_count = 0
+            self.last_trade_day = current_date
+            
+        if self.daily_trades_count >= 12:
+            self.terminal_log(f"[X] {symbol}: Daily trade limit reached (12/12) - Skipping entry", "WARNING", critical=True)
+            return False
+            
         try:
             # Get symbol info
             symbol_info = mt5.symbol_info(symbol)  # type: ignore
@@ -4864,6 +5030,34 @@ class AdvancedMT5TradingMonitorGUI:
             self.terminal_log(f"   Volume: {lot_size} lots | Risk: ${risk_amount:.2f} ({risk_percent*100:.1f}%)", "INFO", critical=True)
             self.terminal_log(f"   ATR: {atr:.5f} | SL_Multi: {atr_sl_multiplier} | TP_Multi: {atr_tp_multiplier}", "INFO", critical=True)
             
+            # ==========================================
+            # ORACLE3 PRE-FLIGHT SIMULATION
+            # ==========================================
+            self.terminal_log(f" {symbol}: Running Oracle3 Pre-flight Simulation...", "DEBUG", critical=True)
+            
+            # 1. Margin Check
+            margin_req = mt5.order_calc_margin(request['type'], request['symbol'], request['volume'], request['price']) # type: ignore
+            if margin_req is None:
+                self.terminal_log(f"[X] {symbol}: Pre-flight FAILED - Cannot calculate margin requirement", "WARNING", critical=True)
+                return False
+                
+            if margin_req > account_info.margin_free:
+                self.terminal_log(f"[X] {symbol}: Pre-flight FAILED - Insufficient margin (Req: ${margin_req:.2f}, Free: ${account_info.margin_free:.2f})", "WARNING", critical=True)
+                return False
+                
+            # 2. Profit Validation Check
+            # Simulate the potential loss at Stop Loss to ensure it aligns with Kelly Risk Amount
+            profit_sim = mt5.order_calc_profit(request['type'], request['symbol'], request['volume'], request['price'], request['sl']) # type: ignore
+            if profit_sim is not None:
+                # profit_sim at SL should be negative. If it's vastly larger than risk_amount, we might face a liquidity gap
+                sim_loss = abs(profit_sim)
+                if sim_loss > (risk_amount * 1.5): # 50% tolerance for slippage
+                    self.terminal_log(f"[X] {symbol}: Pre-flight FAILED - Simulated slippage loss (${sim_loss:.2f}) exceeds Kelly limit (${risk_amount:.2f})", "WARNING", critical=True)
+                    return False
+            
+            self.terminal_log(f" {symbol}: Pre-flight PASSED (Margin: ${margin_req:.2f}, Safety Confirmed)", "INFO", critical=True)
+            # ==========================================
+            
             # Send order
             result = mt5.order_send(request)  # type: ignore
             
@@ -4877,7 +5071,8 @@ class AdvancedMT5TradingMonitorGUI:
                 return False
             
             # Success!
-            self.terminal_log(f"[OK] {symbol}: Order executed successfully!", "SUCCESS", critical=True)
+            self.daily_trades_count += 1
+            self.terminal_log(f"[OK] {symbol}: Order executed successfully! (Daily Trades: {self.daily_trades_count}/12)", "SUCCESS", critical=True)
             self.terminal_log(f"   Order: #{result.order} | Deal: #{result.deal}", "SUCCESS", critical=True)
             self.terminal_log(f"   Volume: {result.volume} lots @ {result.price}", "SUCCESS", critical=True)
             

@@ -594,7 +594,13 @@ class GoldPositionManager:
         with self._lock:
             tickets_to_remove = []
             
-            for ticket, info in self._tracked_positions.items():
+            # ORACLE3 LIFO UNWINDING: Sort tracked positions by ticket ID descending (newest first)
+            # This ensures that newest positions are checked and closed first, freeing up margin 
+            # and reducing short-term exposure during high volatility.
+            lifo_tickets = sorted(self._tracked_positions.keys(), reverse=True)
+            
+            for ticket in lifo_tickets:
+                info = self._tracked_positions[ticket]
                 # Check if position still exists in MT5
                 positions = mt5.positions_get(ticket=ticket)
                 if positions is None or len(positions) == 0:

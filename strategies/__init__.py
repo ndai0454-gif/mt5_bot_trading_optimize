@@ -19,34 +19,44 @@ Available Strategies:
 
 # Import all strategies for easier access
 try:
-    from .sunrise_ogle_eurusd import SunriseOgle as SunriseOgleEURUSD
+    from .sunrise_ogle_eurusd import SunriseOgle as SunriseOgleEURUSD  # type: ignore
 except ImportError:
-    SunriseOgleEURUSD = None
+    SunriseOgleEURUSD = None  # type: ignore
 
 try:
-    from .sunrise_ogle_gbpusd import SunriseOgle as SunriseOgleGBPUSD
+    from .sunrise_ogle_gbpusd import SunriseOgle as SunriseOgleGBPUSD  # type: ignore
 except ImportError:
-    SunriseOgleGBPUSD = None
+    SunriseOgleGBPUSD = None  # type: ignore
 
 try:
-    from .sunrise_ogle_xauusd import SunriseOgle as SunriseOgleXAUUSD
+    from .sunrise_ogle_xauusd import SunriseOgle as SunriseOgleXAUUSD  # type: ignore
 except ImportError:
-    SunriseOgleXAUUSD = None
+    SunriseOgleXAUUSD = None  # type: ignore
 
 try:
-    from .sunrise_ogle_audusd import SunriseOgle as SunriseOgleAUDUSD
+    from .sunrise_ogle_audusd import SunriseOgle as SunriseOgleAUDUSD  # type: ignore
 except ImportError:
-    SunriseOgleAUDUSD = None
+    SunriseOgleAUDUSD = None  # type: ignore
 
 try:
-    from .sunrise_ogle_xagusd import SunriseOgle as SunriseOgleXAGUSD
+    from .sunrise_ogle_xagusd import SunriseOgle as SunriseOgleXAGUSD  # type: ignore
 except ImportError:
-    SunriseOgleXAGUSD = None
+    SunriseOgleXAGUSD = None  # type: ignore
 
 try:
-    from .sunrise_ogle_usdchf import SunriseOgle as SunriseOgleUSDCHF
+    from .sunrise_ogle_usdchf import SunriseOgle as SunriseOgleUSDCHF  # type: ignore
 except ImportError:
-    SunriseOgleUSDCHF = None
+    SunriseOgleUSDCHF = None  # type: ignore
+
+try:
+    from .sunrise_ogle_eurjpy import SunriseOgle as SunriseOgleEURJPY  # type: ignore
+except ImportError:
+    SunriseOgleEURJPY = None  # type: ignore
+
+try:
+    from .sunrise_ogle_usdjpy import SunriseOgleUSDJPY  # type: ignore
+except ImportError:
+    SunriseOgleUSDJPY = None  # type: ignore
 
 # Export all available strategies
 __all__ = [
@@ -55,7 +65,9 @@ __all__ = [
     'SunriseOgleXAUUSD',
     'SunriseOgleAUDUSD',
     'SunriseOgleXAGUSD',
-    'SunriseOgleUSDCHF'
+    'SunriseOgleUSDCHF',
+    'SunriseOgleEURJPY',
+    'SunriseOgleUSDJPY',
 ]
 
 # Strategy mapping for easy access
@@ -65,5 +77,7 @@ STRATEGY_CLASSES = {
     'XAUUSD': SunriseOgleXAUUSD,
     'AUDUSD': SunriseOgleAUDUSD,
     'XAGUSD': SunriseOgleXAGUSD,
-    'USDCHF': SunriseOgleUSDCHF
+    'USDCHF': SunriseOgleUSDCHF,
+    'EURJPY': SunriseOgleEURJPY,
+    'USDJPY': SunriseOgleUSDJPY,
 }

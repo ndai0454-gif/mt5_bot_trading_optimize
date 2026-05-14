@@ -251,7 +251,7 @@ class SunriseOgleUSDJPY(bt.Strategy):
     params = dict(
         # === TECHNICAL INDICATORS ===
         ema_fast_length=14,              # Fast EMA period for trend detection
-        ema_medium_length=14,             # Medium EMA period for trend confirmation
+        ema_medium_length=18,             # Medium EMA period for trend confirmation
         ema_slow_length=24,               # Slow EMA period for trend strength
         ema_confirm_length=1,             # Confirmation EMA (usually 1 for immediate response)
         ema_filter_price_length=70,       # Price filter EMA to avoid counter-trend trades
@@ -1193,6 +1193,9 @@ class SunriseOgleUSDJPY(bt.Strategy):
     def _phase4_monitor_window(self, armed_direction):
         """PHASE 4: Monitor for breakout or failure within the two-sided channel"""
         current_bar = len(self)
+
+        if self.window_bar_start is None or self.window_expiry_bar is None:
+            return None
 
         if current_bar < self.window_bar_start:
             return None

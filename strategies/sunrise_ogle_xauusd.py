@@ -316,7 +316,7 @@ class SunriseOgle(bt.Strategy):
     params = dict(
         # === TECHNICAL INDICATORS ===
         ema_fast_length=14,               # Fast EMA period for trend detection #14
-        ema_medium_length=14,             # Medium EMA period for trend confirmation #18
+        ema_medium_length=18,             # Medium EMA period for trend confirmation #18
         ema_slow_length=24,                # Slow EMA period for trend strength # 24
         ema_confirm_length=1,             # Confirmation EMA (usually 1 for immediate response)
         ema_filter_price_length=100,       # Price filter EMA to avoid counter-trend trades #50
@@ -1397,6 +1397,9 @@ class SunriseOgle(bt.Strategy):
         current_bar = len(self)
 
         # Check if window is active yet
+        if self.window_bar_start is None or self.window_expiry_bar is None:
+            return None
+            
         if current_bar < self.window_bar_start:
             return None  # Not yet active, do nothing
 

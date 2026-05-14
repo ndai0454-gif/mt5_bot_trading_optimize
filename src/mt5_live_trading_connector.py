@@ -96,7 +96,7 @@ print(f"Successfully imported {len(strategy_imports)} strategy classes")
 # === SAFETY SETTINGS ===
 DEMO_MODE_ONLY = True                    # SAFETY: Set False only for real trading
 MAX_RISK_PER_TRADE = 0.01               # Maximum 1% risk per trade
-MAX_DAILY_TRADES = 10                   # Maximum trades per day
+MAX_DAILY_TRADES = 12                   # Maximum trades per day
 MAX_POSITION_SIZE = 0.1                 # Maximum lot size (0.1 = 0.1 standard lots)
 ENABLE_TRADE_CONFIRMATION = True        # Require manual confirmation for each trade
 
@@ -108,7 +108,7 @@ MT5_TIMEOUT = 60000                      # Connection timeout in milliseconds
 
 # === TRADING SETTINGS ===
 SYMBOLS_TO_TRADE = ['EURUSD']            # Start with single symbol for testing
-DEFAULT_TIMEFRAME = mt5.TIMEFRAME_M5     # 5-minute timeframe
+DEFAULT_TIMEFRAME = mt5.TIMEFRAME_H1     # 1-hour timeframe
 SIGNAL_CHECK_INTERVAL = 30               # Check for signals every 30 seconds
 MAX_SPREAD_PIPS = 3                      # Maximum allowed spread in pips
 
