@@ -1,0 +1,29 @@
+﻿e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:163:30 - error: Cannot access attribute "replace" for class "ndarray[_AnyShape, dtype[Any]]"
+  Â Â Attribute "replace" is unknown (reportAttributeAccessIssue)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:164:58 - error: Cannot access attribute "fillna" for class "float"
+  Â Â Attribute "fillna" is unknown (reportAttributeAccessIssue)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:164:58 - error: Cannot access attribute "fillna" for class "ndarray[_AnyShape, dtype[float64]]"
+  Â Â Attribute "fillna" is unknown (reportAttributeAccessIssue)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:218:24 - error: Cannot assign to attribute "timestamp" for class "TradingSignal"
+  Â Â Expression of type "Unknown | Index" cannot be assigned to attribute "timestamp" of class "TradingSignal"
+  Â Â Â Â Type "Unknown | Index" is not assignable to type "datetime"
+  Â Â Â Â Â Â "Index" is not assignable to "datetime" (reportAttributeAccessIssue)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:251:17 - error: Operator ">" not supported for "None" (reportOptionalOperand)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:252:17 - error: Operator ">" not supported for types "float" and "Unknown | None"
+  Â Â Operator ">" not supported for types "float" and "None" (reportOperatorIssue)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:253:17 - error: Operator ">" not supported for "None" (reportOptionalOperand)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:253:30 - error: Operator "<" not supported for "None" (reportOptionalOperand)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:254:17 - error: Operator ">" not supported for "None" (reportOptionalOperand)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:264:19 - error: Operator "<" not supported for "None" (reportOptionalOperand)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:265:19 - error: Operator "<" not supported for types "float" and "Unknown | None"
+  Â Â Operator "<" not supported for types "float" and "None" (reportOperatorIssue)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:266:19 - error: Operator ">" not supported for "None" (reportOptionalOperand)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:266:32 - error: Operator "<" not supported for "None" (reportOptionalOperand)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:267:19 - error: Operator "<" not supported for "None" (reportOptionalOperand)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:369:24 - error: "initialize" is not a known attribute of module "MetaTrader5" (reportAttributeAccessIssue)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:370:69 - error: "last_error" is not a known attribute of module "MetaTrader5" (reportAttributeAccessIssue)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:387:25 - error: "copy_rates_from_pos" is not a known attribute of module "MetaTrader5" (reportAttributeAccessIssue)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:404:24 - error: "symbol_info_tick" is not a known attribute of module "MetaTrader5" (reportAttributeAccessIssue)
+  e:\BT5\mt5_tradingbot\mt5_live_trading_bot\src\sunrise_signal_adapter.py:422:17 - error: "shutdown" is not a known attribute of module "MetaTrader5" (reportAttributeAccessIssue)
+19 errors, 0 warnings, 0 informations

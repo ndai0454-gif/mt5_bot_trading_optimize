@@ -31,6 +31,24 @@ try:
 except ImportError:
     GOLD_ENHANCEMENTS_AVAILABLE = False
 
+# Command Processor for Claude Interface
+try:
+    from command_processor import process_commands
+    COMMAND_PROCESSOR_AVAILABLE = True
+except ImportError:
+    COMMAND_PROCESSOR_AVAILABLE = False
+
+# Bot Notifier - Push notifications to file for Claude
+try:
+    from bot_notifier import (
+        notify_crossover, notify_armed, notify_pullback, notify_window,
+        notify_breakout, notify_entry, notify_exit, notify_filter_failed,
+        notify_error, notify_info, get_notifier
+    )
+    NOTIFIER_AVAILABLE = True
+except ImportError:
+    NOTIFIER_AVAILABLE = False
+
 # Try to import charting libraries
 try:
     import matplotlib.pyplot as plt
@@ -925,6 +943,11 @@ class AdvancedMT5TradingMonitorGUI:
             # Position Sizing
             'enable_risk_sizing': 'Enable Risk Sizing',
             'risk_percent': 'Risk Percentage per Trade',
+
+            # RSI Settings
+            'rsi_period': 'RSI Period',
+            'rsi_overbought': 'RSI Overbought Level',
+            'rsi_oversold': 'RSI Oversold Level',
         }
         
         for param, description in config_params.items():
@@ -1529,7 +1552,14 @@ class AdvancedMT5TradingMonitorGUI:
                     
                     # PERSISTENCE: Save state after processing candle close
                     self.save_strategy_state()
-                    
+
+                    # CLAUDE INTERFACE: Process commands from Claude
+                    if COMMAND_PROCESSOR_AVAILABLE:
+                        process_commands(
+                            self.strategy_states,
+                            logger=lambda m: self.terminal_log(f"[CLAUDE] {m}", "INFO")
+                        )
+
                     # KELLY: Scan for closed trades to update position sizing stats
                     self.scan_closed_trades_for_kelly()
                     
@@ -2286,10 +2316,60 @@ class AdvancedMT5TradingMonitorGUI:
                     return False
             
             return True
-            
+
         except Exception as e:
             self.terminal_log(f" {symbol}: EMA position filter error: {str(e)}", "WARNING")
             return False  #  FIX: On error, BLOCK trade
+
+    def _validate_rsi_trigger(self, symbol, rsi_value, trend, direction='LONG'):
+        """Validate RSI-based trigger for entry confirmation.
+
+        RSI Trigger Logic:
+        - LONG: RSI > 50 confirms bullish momentum (RSI < 30 = oversold, > 70 = overbought)
+        - SHORT: RSI < 50 confirms bearish momentum
+        - Additionally, for enhanced entries:
+          - LONG when RSI > 70: Strong momentum but beware of reversal
+          - SHORT when RSI < 30: Strong bearish momentum but beware of bounce
+        """
+        try:
+            if rsi_value is None or rsi_value == 50.0:
+                # Neutral RSI - allow based on other factors
+                self.terminal_log(f" {symbol}: RSI neutral ({rsi_value}), relying on EMA trend", "INFO")
+                return True
+
+            digits = self.strategy_states.get(symbol, {}).get('digits', 5)
+
+            if direction == 'LONG':
+                # LONG entry triggers:
+                # 1. Basic: RSI > 50 (bullish zone)
+                # 2. Enhanced: RSI 50-70 (healthy uptrend) - RECOMMENDED
+                # 3. Caution: RSI > 70 (overbought - potential reversal)
+
+                if rsi_value >= 50:
+                    self.terminal_log(f" [OK] {symbol} LONG: RSI {rsi_value:.2f} >= 50 - Bullish momentum confirmed", "INFO")
+                    return True
+                else:
+                    self.terminal_log(f"[X] {symbol} LONG: RSI {rsi_value:.2f} < 50 - Weak momentum, waiting", "WARNING")
+                    return False
+
+            elif direction == 'SHORT':
+                # SHORT entry triggers:
+                # 1. Basic: RSI < 50 (bearish zone)
+                # 2. Enhanced: RSI 30-50 (healthy downtrend) - RECOMMENDED
+                # 3. Caution: RSI < 30 (oversold - potential bounce)
+
+                if rsi_value <= 50:
+                    self.terminal_log(f" [OK] {symbol} SHORT: RSI {rsi_value:.2f} <= 50 - Bearish momentum confirmed", "INFO")
+                    return True
+                else:
+                    self.terminal_log(f"[X] {symbol} SHORT: RSI {rsi_value:.2f} > 50 - Weak momentum, waiting", "WARNING")
+                    return False
+
+            return True  # Default allow
+
+        except Exception as e:
+            self.terminal_log(f" {symbol}: RSI trigger validation error: {str(e)}", "WARNING")
+            return True  # Allow on error to avoid blocking trades
 
     def _validate_time_filter(self, symbol, current_dt, direction):
         """Validate if current time is within allowed trading hours (UTC)
@@ -2643,11 +2723,19 @@ class AdvancedMT5TradingMonitorGUI:
                 
                 # 6. EMA Position (new filter)
                 ema_position_passed = self._validate_ema_position_filter(symbol, df_closed, fast_ema, medium_ema, slow_ema, 'LONG')
-                self.terminal_log(f"    {symbol}: EMA Position -> {'[OK] PASS' if ema_position_passed else '[X] FAIL'}", 
+                self.terminal_log(f"    {symbol}: EMA Position -> {'[OK] PASS' if ema_position_passed else '[X] FAIL'}",
                                 "DEBUG", critical=True)
                 if not ema_position_passed:
                     all_filters_passed = False
-                
+
+                # 7. RSI Trigger (NEW - enhanced trigger logic)
+                rsi_value = indicators.get('rsi', 50.0)
+                rsi_passed = self._validate_rsi_trigger(symbol, rsi_value, indicators.get('trend', 'SIDEWAYS'), 'LONG')
+                self.terminal_log(f"    {symbol}: RSI Trigger (>{rsi_value:.1f}) -> {'[OK] PASS' if rsi_passed else '[X] FAIL'}",
+                                "DEBUG", critical=True)
+                if not rsi_passed:
+                    all_filters_passed = False
+
                 # NOTE: Time filter is NOT checked here (matches original strategy)
                 # Time filter is only validated at BREAKOUT/ENTRY execution (Phase 4)
                 
@@ -2695,9 +2783,9 @@ class AdvancedMT5TradingMonitorGUI:
         try:
             # Get strategy-specific parameters
             config = self.strategy_configs.get(symbol, {})
-            
+
             # Debug: log the config keys (remove after testing)
-            # self.terminal_log(f" {symbol} config keys: {list(config.keys())}", "NORMAL")
+            self.terminal_log(f" {symbol} DEBUG: ema_fast_length={config.get('ema_fast_length')}, ema_medium_length={config.get('ema_medium_length')}", "NORMAL")
             
             # Extract EMA periods from config (using correct parameter names from strategy)
             fast_period = self.extract_numeric_value(config.get('ema_fast_length', 
@@ -2734,6 +2822,9 @@ class AdvancedMT5TradingMonitorGUI:
             indicators['ema_medium_period'] = medium_period
             indicators['ema_slow_period'] = slow_period
             indicators['ema_filter_period'] = filter_period
+
+            # Log EMA periods being used
+            self.terminal_log(f" {symbol} EMA Periods: Fast={fast_period}, Medium={medium_period}, Slow={slow_period}", "INFO", critical=False)
             
             # DEBUG: Log EMA(70) calculation details for comparison with MT5
             if symbol == "EURUSD" and len(df) > 0:
@@ -2776,7 +2867,33 @@ class AdvancedMT5TradingMonitorGUI:
                                 "WARNING", critical=True)
                 
             indicators['atr_period'] = atr_period
-            
+
+            # ========== RSI CALCULATION ==========
+            # RSI Period from config (default 14)
+            rsi_period = self.extract_numeric_value(config.get('rsi_period',
+                                                    config.get('RSI Period', '14')))
+            if len(df) >= rsi_period:
+                try:
+                    delta = df['close'].diff()
+                    gain = delta.where(delta > 0, 0.0)
+                    loss = (-delta).where(delta < 0, 0.0)
+                    avg_gain = gain.rolling(window=rsi_period).mean()
+                    avg_loss = loss.rolling(window=rsi_period).mean()
+                    rs = avg_gain / avg_loss
+                    rsi = 100 - (100 / (1 + rs))
+                    indicators['rsi'] = rsi.iloc[-1]
+                    indicators['rsi_period'] = rsi_period
+
+                    # Log RSI value
+                    self.terminal_log(f" RSI: {symbol} | Period={rsi_period} | Value={indicators['rsi']:.2f}",
+                                    "INFO", critical=False)
+                except Exception as e:
+                    indicators['rsi'] = 50.0  # Neutral fallback
+                    indicators['rsi_period'] = rsi_period
+            else:
+                indicators['rsi'] = 50.0
+                indicators['rsi_period'] = rsi_period
+
             # Current price
             indicators['current_price'] = df['close'].iloc[-1]
             
